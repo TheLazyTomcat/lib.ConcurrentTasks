@@ -9,13 +9,13 @@
 
   Concurrent tasks
 
-  Â©FrantiÅ¡ek Milt 2017-08-17
+  ©František Milt 2017-08-17
 
-  Version 0.9a
+  Version 1.0
 
   todo: How to use this unit.
 
-  WARNING - current implementation was not proprly tested.
+  WARNING - current implementation was not fully tested.
 
   Dependencies:
     AuxTypes    - github.com/ncs-sniper/Lib.AuxTypes
@@ -422,12 +422,11 @@ case Msg.Parameter1 of
     begin
       Index := IndexOfTask(Msg.Sender);
       If Index >= 0 then
-        If Single(Addr(Msg.Parameter2)^) > fTasks[Index].PublicPart.Progress then
-          begin
-            fTasks[Index].PublicPart.Progress := Single(Addr(Msg.Parameter2)^);
-            If Assigned(fOnTaskProgress) then
-              fOnTaskProgress(Sender,Index);
-          end;
+        begin
+          fTasks[Index].PublicPart.Progress := Single(Addr(Msg.Parameter2)^);
+          If Assigned(fOnTaskProgress) then
+            fOnTaskProgress(Sender,Index);
+        end;
     end;
   CNTS_MSG_COMPLETED:
     begin
@@ -701,7 +700,11 @@ begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   case fTasks[TaskIndex].PublicPart.State of
     tsReady:
-      fTasks[TaskIndex].PublicPart.State := tsWaiting;
+      begin
+        fTasks[TaskIndex].PublicPart.State := tsWaiting;
+        If Assigned(fOnTaskState) then
+          fOnTaskState(Self,TaskIndex);
+      end;
     tsRunning:
       begin
         fTasks[TaskIndex].PublicPart.State := tsPaused;
@@ -721,7 +724,11 @@ begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   case fTasks[TaskIndex].PublicPart.State of
     tsWaiting:
-      fTasks[TaskIndex].PublicPart.State := tsReady;
+      begin
+        fTasks[TaskIndex].PublicPart.State := tsReady;
+        If Assigned(fOnTaskState) then
+          fOnTaskState(Self,TaskIndex);
+      end;
     tsPaused:
       begin
         fTasks[TaskIndex].PublicPart.State := tsRunning;
