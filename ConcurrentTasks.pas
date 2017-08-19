@@ -42,6 +42,7 @@
 
   Dependencies:
     AuxTypes    - github.com/ncs-sniper/Lib.AuxTypes
+    Messanger   - github.com/ncs-sniper/Lib.Messanger
     MemVector   - github.com/ncs-sniper/Lib.MemVector
     WinSyncObjs - github.com/ncs-sniper/Lib.WinSyncObjs
     StrRect     - github.com/ncs-sniper/Lib.StrRect
