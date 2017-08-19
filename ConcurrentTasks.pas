@@ -9,13 +9,36 @@
 
   Concurrent tasks
 
-  ©František Milt 2017-08-17
+  ©František Milt 2017-08-19
 
-  Version 1.0
+  Version 1.1
 
-  todo: How to use this unit.
+  To use this unit, create a descendant of class TCNTSTask and put the threaded
+  code into method Main (override it). Then pass instance of this class to an
+  instance of TCNTSManager. Manager will automatically start the task when
+  resources get available, or you can start the task manually (this will pause
+  other task when there are no running slots available).
+  You can call any public method of TCNTSTask from Main, but remember to protect
+  any shared data you want to use, tasks don't have any mean of thread-safety
+  protection. In Main, you should call method Cycle regularly if you want to use
+  integrated messaging system (in that case, also remember to override method
+  ProcessMessage - put a code that will process incoming messages there).
 
-  WARNING - current implementation was not fully tested.
+  The implementation of method Main is entirely up to you, but suggested
+  template is as follows:
+
+    Function TTestTask.Main: Boolean;
+    begin
+      while not Terminated do
+        begin
+          Cycle;
+          [user code]
+          [progress signalling]
+        end;
+      Result := not Terminated;
+    end;
+
+ - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -    
 
   Dependencies:
     AuxTypes    - github.com/ncs-sniper/Lib.AuxTypes
@@ -126,7 +149,14 @@ type
 --------------------------------------------------------------------------------
 ===============================================================================}
 
-  TCNTSTaskState = (tsReady,tsRunning,tsWaiting,tsPaused,tsCompleted,tsAborted);
+  TCNTSTaskState = (
+    tsReady,      // not running
+    tsRunning,    // running
+    tsQueued,     // not running, paused
+    tsPaused,     // running, paused
+    tsWaiting,    // running, paused internally (can be automatically unpaused)
+    tsCompleted,  // completed, returned true
+    tsAborted);   // completed, returned false
 
   TCNTSTaskItem = record
     State:      TCNTSTaskState;
@@ -158,25 +188,34 @@ type
     fMaxConcurrentTasks:  Integer;
     fMessanger:           TMessanger;
     fCommEndpoint:        TMessangerEndpoint;
+    fInternalAction:      Boolean;
     fOnMessage:           TCNTSMessageEvent;
     fOnTaskState:         TCNTSTaskEvent;
     fOnTaskProgress:      TCNTSTaskEvent;
     fOnTaskCompleted:     TCNTSTaskEvent;
     fOnTaskRemove:        TCNTSTaskEvent;
+    fOnChange:            TNotifyEvent;
     Function GetTaskCount: Integer;
     Function GetTask(Index: Integer): TCNTSTaskItem;
     procedure SetMaxConcurrentTasks(Value: Integer);
   protected
     procedure MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags); virtual;
-    procedure ManageRunningTasks; virtual;
+    procedure ManageRunningTasks(IgnoreTask: Integer = -1); virtual;
   public
     class Function GetProcessorCount: Integer; virtual;
     constructor Create(OwnsTaskObjects: Boolean = True);
     destructor Destroy; override;
     procedure Update(WaitTimeOut: LongWord = 0); virtual;
+    Function LowIndex: Integer; virtual;
+    Function HighIndex: Integer; virtual;
+    Function First: TCNTSTaskItem; virtual;
+    Function Last: TCNTSTaskItem; virtual;
     Function IndexOfTask(TaskObject: TCNTSTask): Integer; overload; virtual;
     Function IndexOfTask(CommEndpointID: TCNTSMessageEndpoint): Integer; overload; virtual;
     Function AddTask(TaskObject: TCNTSTask): Integer; virtual;
+    procedure Insert(Index: Integer; TaskObject: TCNTSTask); virtual;
+    procedure Move(CurIdx, NewIdx: Integer); virtual;
+    procedure Exchange(Index1, Index2: Integer); virtual;
     Function RemoveTask(TaskObject: TCNTSTask): Integer; virtual;
     procedure DeleteTask(TaskIndex: Integer); virtual;
     Function ExtractTask(TaskObject: TCNTSTask): TCNTSTask; virtual;
@@ -200,6 +239,7 @@ type
     property OnTaskProgress: TCNTSTaskEvent read fOnTaskProgress write fOnTaskProgress;
     property OnTaskCompleted: TCNTSTaskEvent read fOnTaskCompleted write fOnTaskCompleted; 
     property OnTaskRemove: TCNTSTaskEvent read fOnTaskRemove write fOnTaskRemove;
+    property OnChange: TNotifyEvent read fOnChange write fOnChange;
   end;
 
 implementation
@@ -349,6 +389,7 @@ end;
 constructor TCNTSThread.Create(TaskObject: TCNTSTask; CommEndpoint: TMessangerEndpoint; PauseObject: TEvent);
 begin
 inherited Create(False);
+Priority := tpLower;
 FreeOnTerminate := False;
 fTaskObject := TaskObject;
 fCommEndpoint := CommEndpoint;
@@ -449,22 +490,43 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure TCNTSManager.ManageRunningTasks;
+procedure TCNTSManager.ManageRunningTasks(IgnoreTask: Integer = -1);
 var
   RunCount: Integer;
   i:        Integer;
 begin
-RunCount := fMaxConcurrentTasks - GetRunningTaskCount;
-For i := Low(fTasks) to High(fTasks) do
+fInternalAction := True;
+try
+  RunCount := fMaxConcurrentTasks - GetRunningTaskCount;
   If RunCount > 0 then
     begin
-      If fTasks[i].PublicPart.State = tsReady then
-        begin
-          StartTask(i);
-          Dec(RunCount);
-        end;
+      For i := Low(fTasks) to High(fTasks) do
+        If RunCount > 0 then
+          begin
+            If (fTasks[i].PublicPart.State in [tsReady,tsWaiting]) and (i <> IgnoreTask) then
+              begin
+                StartTask(i);
+                Dec(RunCount);
+              end;
+          end
+        else Break{For i};
     end
-  else Break{For i};
+  else If RunCount < 0 then
+    begin
+      For i := High(fTasks) downto Low(fTasks) do
+        If RunCount < 0 then
+          begin
+            If (fTasks[i].PublicPart.State = tsRunning) and (i <> IgnoreTask) then
+              begin
+                PauseTask(i);
+                Inc(RunCount);
+              end;
+          end
+        else Break{For i};
+    end;
+finally
+  fInternalAction := False;
+end;
 end;
 
 {-------------------------------------------------------------------------------
@@ -492,6 +554,7 @@ fMaxConcurrentTasks := GetProcessorCount;
 fMessanger := TMessanger.Create;
 fCommEndpoint := fMessanger.CreateEndpoint(0);
 fCommEndpoint.OnMessageTraversing := MessageHandler;
+fInternalAction := False;
 end;
 
 //------------------------------------------------------------------------------
@@ -511,6 +574,34 @@ procedure TCNTSManager.Update(WaitTimeOut: LongWord = 0);
 begin
 fCommEndpoint.Cycle(WaitTimeOut);
 ManageRunningTasks;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.LowIndex: Integer;
+begin
+Result := Low(fTasks);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.HighIndex: Integer;
+begin
+Result := High(fTasks);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.First: TCNTSTaskItem;
+begin
+Result := GetTask(LowIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.Last: TCNTSTaskItem;
+begin
+Result := GetTask(HighIndex);
 end;
 
 //------------------------------------------------------------------------------
@@ -559,9 +650,88 @@ NewTaskItem.AssignedThread := nil;
 SetLength(fTasks,Length(fTasks) + 1);
 Result := High(fTasks);
 fTasks[Result] := NewTaskItem;
+If Assigned(fOnChange) then
+  fOnChange(Self);
 If Assigned(fOnTaskState) then
   fOnTaskState(Self,Result);
 ManageRunningTasks;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Insert(Index: Integer; TaskObject: TCNTSTask);
+var
+  NewTaskItem:  TCNTSTaskItemFull;
+  i:            Integer;
+begin
+If (Index >= Low(fTasks)) and (Index <= High(fTasks)) then
+  begin
+    NewTaskItem.PublicPart.State := tsReady;
+    NewTaskItem.PublicPart.TaskObject := TaskObject;
+    NewTaskItem.PublicPart.Progress := 0.0;
+    NewTaskItem.CommEndpoint := fMessanger.CreateEndpoint;
+    NewTaskItem.PauseObject := TEvent.Create(nil,True,True,'');
+    NewTaskItem.AssignedThread := nil;
+    SetLength(fTasks,Length(fTasks) + 1);
+    For i := High(fTasks) downto Succ(Index) do
+      fTasks[i] := fTasks[i - 1];
+    fTasks[Index] := NewTaskItem;
+    If Assigned(fOnChange) then
+      fOnChange(Self);
+    If Assigned(fOnTaskState) then
+      fOnTaskState(Self,Index);
+    ManageRunningTasks;
+  end
+else If Index = Length(fTasks) then
+  AddTask(TaskObject)
+else
+  raise Exception.CreateFmt('TCNTSManager.Insert: Index (%d) out of bounds.',[Index]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Move(CurIdx, NewIdx: Integer);
+var
+  TempItem: TCNTSTaskItemFull;
+  i:        Integer;
+begin
+If CurIdx <> NewIdx then
+  begin
+    If (CurIdx < Low(fTasks)) or (CurIdx > High(fTasks)) then
+      raise Exception.CreateFmt('TCNTSManager.Move: CurIdx (%d) out of bounds.',[CurIdx]);
+    If (NewIdx < Low(fTasks)) or (NewIdx > High(fTasks)) then
+      raise Exception.CreateFmt('TCNTSManager.Move: NewIdx (%d) out of bounds.',[NewIdx]);
+    TempItem := fTasks[CurIdx];
+    If NewIdx > CurIdx then
+      For i := CurIdx to Pred(NewIdx) do
+        fTasks[i] := fTasks[i + 1]
+    else
+      For i := CurIdx downto Succ(NewIdx) do
+        fTasks[i] := fTasks[i - 1];
+    fTasks[NewIdx] := TempItem;
+    If Assigned(fOnChange) then
+      fOnChange(Self);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Exchange(Index1, Index2: Integer);
+var
+  TempItem: TCNTSTaskItemFull;
+begin
+If Index1 <> Index2 then
+  begin
+    If (Index1 < Low(fTasks)) or (Index1 > High(fTasks)) then
+      raise Exception.CreateFmt('TCNTSManager.Exchange: Index1 (%d) out of bounds.',[Index1]);
+    If (Index2 < Low(fTasks)) or (Index2 > High(fTasks)) then
+      raise Exception.CreateFmt('TCNTSManager.Exchange: Index2 (%d) out of bounds.',[Index2]);
+    TempItem := fTasks[Index1];
+    fTasks[Index1] := fTasks[Index2];
+    fTasks[Index2] := TempItem;
+    If Assigned(fOnChange) then
+      fOnChange(Self);
+  end;
 end;
 
 //------------------------------------------------------------------------------
@@ -580,7 +750,7 @@ var
 begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   begin
-    If not(fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused]) then
+    If not(fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused,tsWaiting]) then
       begin
         If Assigned(fTasks[TaskIndex].AssignedThread) then
           begin
@@ -600,6 +770,8 @@ If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
         For i := TaskIndex to Pred(High(fTasks)) do
           fTasks[i] := fTasks[i + 1];
         SetLength(fTasks,Length(fTasks) - 1);
+        If Assigned(fOnChange) then
+          fOnChange(Self);
       end
     else raise Exception.CreateFmt('TCNTSManager.DeleteTask: Cannot delete running task (#%d).',[TaskIndex]);
   end
@@ -616,7 +788,7 @@ begin
 Index := IndexOfTask(TaskObject);
 If Index >= 0 then
   begin
-    If not(fTasks[Index].PublicPart.State in [tsRunning,tsPaused]) then
+    If not(fTasks[Index].PublicPart.State in [tsRunning,tsPaused,tsWaiting]) then
       begin
         If Assigned(fTasks[Index].AssignedThread) then
           begin
@@ -633,6 +805,8 @@ If Index >= 0 then
         For i := Index to Pred(High(fTasks)) do
           fTasks[i] := fTasks[i + 1];
         SetLength(fTasks,Length(fTasks) - 1);
+        If Assigned(fOnChange) then
+          fOnChange(Self);
       end
     else raise Exception.CreateFmt('TCNTSManager.ExtractTask: Cannot extract running task (#%d).',[Index]);
   end
@@ -643,19 +817,30 @@ end;
 
 procedure TCNTSManager.ClearTasks;
 var
-  i:  Integer;
+  i:      Integer;
+  OldMCT: Integer;
 begin
-For i := High(fTasks) downto Low(fTasks) do
-  begin
-    If fTasks[i].PublicPart.State in [tsRunning,tsPaused] then
-      begin
-        ResumeTask(i);
-        fTasks[i].PublicPart.TaskObject.Terminated := True;
-        fTasks[i].AssignedThread.WaitFor;
-      end;
-    fCommEndpoint.Cycle(0);
-    DeleteTask(i);
-  end;
+OldMCT := fMaxConcurrentTasks;
+fMaxConcurrentTasks := High(fMaxConcurrentTasks);
+try
+  For i := Low(fTasks) to High(fTasks) do
+    If fTasks[i].PublicPart.State in [tsPaused,tsWaiting] then
+      ResumeTask(i);
+  For i := High(fTasks) downto Low(fTasks) do
+    begin
+      If fTasks[i].PublicPart.State = tsRunning then
+        begin
+          fTasks[i].PublicPart.TaskObject.Terminated := True;
+          fTasks[i].AssignedThread.WaitFor;
+        end;
+      fCommEndpoint.Cycle(0);
+      DeleteTask(i);
+    end;
+  If Assigned(fOnChange) then
+    fOnChange(Self);
+finally
+  fMaxConcurrentTasks := OldMCT;
+end;
 end;
 
 //------------------------------------------------------------------------------
@@ -668,6 +853,8 @@ Update;
 For i := High(fTasks) downto Low(fTasks) do
   If fTasks[i].PublicPart.State = tsCompleted then
     DeleteTask(i);
+If Assigned(fOnChange) then
+  fOnChange(Self);
 end;
 
 //------------------------------------------------------------------------------
@@ -683,11 +870,13 @@ If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
           TCNTSThread.Create(fTasks[TaskIndex].PublicPart.TaskObject,
                              fTasks[TaskIndex].CommEndpoint,
                              fTasks[TaskIndex].PauseObject);
+        ManageRunningTasks(TaskIndex);
         If Assigned(fOnTaskState) then
           fOnTaskState(Self,TaskIndex);
       end;
-    tsWaiting,
-    tsPaused:
+    tsQueued,
+    tsPaused,
+    tsWaiting:
       ResumeTask(TaskIndex);
   end
 else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
@@ -701,17 +890,26 @@ If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   case fTasks[TaskIndex].PublicPart.State of
     tsReady:
       begin
-        fTasks[TaskIndex].PublicPart.State := tsWaiting;
+        fTasks[TaskIndex].PublicPart.State := tsQueued;
         If Assigned(fOnTaskState) then
           fOnTaskState(Self,TaskIndex);
       end;
     tsRunning:
       begin
-        fTasks[TaskIndex].PublicPart.State := tsPaused;
+        If fInternalAction then
+          fTasks[TaskIndex].PublicPart.State := tsWaiting
+        else
+          fTasks[TaskIndex].PublicPart.State := tsPaused;
         fTasks[TaskIndex].PauseObject.ResetEvent;
         If Assigned(fOnTaskState) then
           fOnTaskState(Self,TaskIndex);
         ManageRunningTasks;
+      end;
+    tsWaiting:
+      begin
+        fTasks[TaskIndex].PublicPart.State := tsPaused;
+        If Assigned(fOnTaskState) then
+          fOnTaskState(Self,TaskIndex);
       end;
   end
 else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
@@ -723,16 +921,18 @@ procedure TCNTSManager.ResumeTask(TaskIndex: Integer);
 begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   case fTasks[TaskIndex].PublicPart.State of
-    tsWaiting:
+    tsQueued:
       begin
         fTasks[TaskIndex].PublicPart.State := tsReady;
         If Assigned(fOnTaskState) then
           fOnTaskState(Self,TaskIndex);
       end;
-    tsPaused:
+    tsPaused,
+    tsWaiting:
       begin
         fTasks[TaskIndex].PublicPart.State := tsRunning;
         fTasks[TaskIndex].PauseObject.SetEvent;
+        ManageRunningTasks(TaskIndex);
         If Assigned(fOnTaskState) then
           fOnTaskState(Self,TaskIndex);
       end;
@@ -746,7 +946,7 @@ procedure TCNTSManager.StopTask(TaskIndex: Integer);
 begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
   begin
-    If fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused] then
+    If fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused,tsWaiting] then
       begin
         fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_TERMINATE,0,0,0);
         fTasks[TaskIndex].PublicPart.TaskObject.Terminated := True;
@@ -810,7 +1010,7 @@ For i := Low(fTasks) to High(fTasks) do
   begin
     If fTasks[i].PublicPart.State in [tsReady,tsRunning] then
       Inc(Result)
-    else If CountPaused and (fTasks[i].PublicPart.State in [tsWaiting,tsPaused]) then
+    else If CountPaused and (fTasks[i].PublicPart.State in [tsQueued,tsPaused,tsWaiting]) then
       Inc(Result);    
   end;
 end;
