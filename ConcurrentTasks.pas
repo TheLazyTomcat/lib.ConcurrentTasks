@@ -9,9 +9,9 @@
 
   Concurrent tasks
 
-  ©František Milt 2017-08-19
+  ©František Milt 2018-04-05
 
-  Version 1.1
+  Version 1.1.1
 
   To use this unit, create a descendant of class TCNTSTask and put the threaded
   code into method Main (override it). Then pass instance of this class to an
@@ -116,7 +116,7 @@ type
     procedure Execute;                                                              // static
     Function PostMessage(Param1,Param2: TCNTSMessageParam): Boolean; virtual;
     Function SendMessage(Param1,Param2: TCNTSMessageParam): TCNTSMessageResult; virtual;
-    procedure SignalProgress(Progress: Single); virtual;
+    procedure SignalProgress(Progress: Double); virtual;
     procedure Cycle; virtual;
     procedure ProcessMessage(var Msg: TCNTSMessage); virtual;
     Function Main: Boolean; virtual; abstract;
@@ -162,7 +162,7 @@ type
   TCNTSTaskItem = record
     State:      TCNTSTaskState;
     TaskObject: TCNTSTask;
-    Progress:   Single;
+    Progress:   Double;
   end;
   PCNTSTaskItem = ^TCNTSTaskItem;
 
@@ -340,12 +340,14 @@ end;
 
 //------------------------------------------------------------------------------
 
-procedure TCNTSTask.SignalProgress(Progress: Single);
+procedure TCNTSTask.SignalProgress(Progress: Double);
 var
-  Value:  TCNTSMessageParam;
+  ValueLo:  TCNTSMessageParam;
+  ValueHi:  TCNTSMessageParam;
 begin
-Value := TCNTSMessageParam(UInt32(Addr(Progress)^));
-fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,Value,0,0);
+ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
+ValueHi := TCNTSMessageParam({%H-}PUInt32({%H-}PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
+fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,ValueLo,ValueHi,0);
 end;
 
 //------------------------------------------------------------------------------
@@ -465,7 +467,8 @@ case Msg.Parameter1 of
       Index := IndexOfTask(Msg.Sender);
       If Index >= 0 then
         begin
-          fTasks[Index].PublicPart.Progress := Single(Addr(Msg.Parameter2)^);
+          UInt32(Addr(fTasks[Index].PublicPart.Progress)^) := UInt32(Msg.Parameter2);
+          {%H-}PUInt32({%H-}PtrUInt(Addr(fTasks[Index].PublicPart.Progress)) + SizeOf(UInt32))^ := UInt32(Msg.Parameter3); 
           If Assigned(fOnTaskProgress) then
             fOnTaskProgress(Sender,Index);
         end;
