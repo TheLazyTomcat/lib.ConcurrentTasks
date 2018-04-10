@@ -986,7 +986,7 @@ end;
 Function TCNTSManager.SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_USER,Param1,Param2,{%H-}TMsgrParam(Addr(Result)))
+  fCommEndpoint.SendMessageAndWait(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_USER,Param1,Param2,{%H-}TMsgrParam(Addr(Result)))
 else
   raise Exception.CreateFmt('TCNTSManager.PostMessage: Index (%d) out of bounds.',[TaskIndex]);
 end;
