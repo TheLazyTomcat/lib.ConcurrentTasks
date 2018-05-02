@@ -42,6 +42,7 @@
 
   Dependencies:
     AuxTypes    - github.com/ncs-sniper/Lib.AuxTypes
+    AuxClasses  - github.com/ncs-sniper/Lib.AuxClasses
     Messanger   - github.com/ncs-sniper/Lib.Messanger
     MemVector   - github.com/ncs-sniper/Lib.MemVector
     WinSyncObjs - github.com/ncs-sniper/Lib.WinSyncObjs
@@ -65,7 +66,7 @@ interface
 
 uses
   Classes,
-  AuxTypes, Messanger, WinSyncObjs;
+  AuxTypes, AuxClasses, Messanger, WinSyncObjs;
 
 {===============================================================================
     Messages
@@ -103,7 +104,7 @@ type
     TCNTSTask - declaration
 ===============================================================================}
 
-  TCNTSTask = class(TObject)
+  TCNTSTask = class(TCustomObject)
   private
     fCommEndpoint:  TMessangerEndpoint;
     fPauseObject:   TEvent;
@@ -182,8 +183,11 @@ type
 {===============================================================================
     TCNTSManager - declaration
 ===============================================================================}
-
-  TCNTSManager = class(TObject)
+{
+  Not derived from TCustomListObject because list growing and shrinking is not
+  of high importance in this class.
+}
+  TCNTSManager = class(TCustomObject)
   private
     fOwnsTaskObjects:     Boolean;
     fTasks:               TCNTSTasks;
