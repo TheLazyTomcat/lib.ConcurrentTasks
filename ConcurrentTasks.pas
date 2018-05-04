@@ -58,6 +58,7 @@ unit ConcurrentTasks;
 {$IFDEF FPC}
   {$MODE Delphi}
   {$DEFINE FPC_DisableWarns}
+  {$MACRO ON}
 {$ENDIF}
 
 {$TYPEINFO ON}
@@ -254,8 +255,9 @@ uses
   Windows, SysUtils;
 
 {$IFDEF FPC_DisableWarns}
-  {$WARN 4055 OFF} // Conversion between ordinals and pointers is not portable
-  {$WARN 5024 OFF} // Parameter "$1" not used  
+  {$DEFINE FPCDWM}
+  {$DEFINE W4055:={$WARN 4055 OFF}} // Conversion between ordinals and pointers is not portable
+  {$DEFINE W5024:={$WARN 5024 OFF}} // Parameter "$1" not used
 {$ENDIF}
 
 {===============================================================================
@@ -295,6 +297,7 @@ end;
     TCNTSTask - protected methods
 -------------------------------------------------------------------------------}
 
+{$IFDEF FPCDWM}{$PUSH}W4055 W5024{$ENDIF}
 procedure TCNTSTask.MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags);
 var
   InternalMessage:  TCNTSMessage;
@@ -314,6 +317,7 @@ case Msg.Parameter1 of
     Terminated := True;
 end;
 end;
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 
 {-------------------------------------------------------------------------------
     TCNTSTask - public methods
@@ -345,7 +349,9 @@ end;
 
 Function TCNTSTask.SendMessage(Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 fCommEndpoint.SendMessageAndWait(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)));
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 end;
 
 //------------------------------------------------------------------------------
@@ -356,7 +362,9 @@ var
   ValueHi:  TCNTSMessageParam;
 begin
 ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 ValueHi := TCNTSMessageParam(PUInt32(PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,ValueLo,ValueHi,0);
 end;
 
@@ -470,7 +478,9 @@ case Msg.Parameter1 of
       If Assigned(fOnMessage) then
         fOnMessage(Self,InternalMessage);
       If mdfSynchronousMessage in Flags then
+      {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
         TCNTSMessageResult(Pointer(Msg.Parameter4)^) := InternalMessage.Result;
+      {$IFDEF FPCDWM}{$POP}{$ENDIF}
     end;
   CNTS_MSG_PROGRESS:
     begin
@@ -478,7 +488,9 @@ case Msg.Parameter1 of
       If Index >= 0 then
         begin
           UInt32(Addr(fTasks[Index].PublicPart.Progress)^) := UInt32(Msg.Parameter2);
+        {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
           PUInt32(PtrUInt(Addr(fTasks[Index].PublicPart.Progress)) + SizeOf(UInt32))^ := UInt32(Msg.Parameter3);
+        {$IFDEF FPCDWM}{$POP}{$ENDIF}
           If Assigned(fOnTaskProgress) then
             fOnTaskProgress(Sender,Index);
         end;
@@ -999,7 +1011,9 @@ end;
 Function TCNTSManager.SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
 If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
   fCommEndpoint.SendMessageAndWait(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)))
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 else
   raise Exception.CreateFmt('TCNTSManager.PostMessage: Index (%d) out of bounds.',[TaskIndex]);
 end;
