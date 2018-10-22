@@ -9,9 +9,9 @@
 
   Concurrent tasks
 
-  ©František Milt 2018-04-15
+  ©František Milt 2018-10-21
 
-  Version 1.1.2
+  Version 1.1.3
 
   To use this unit, create a descendant of class TCNTSTask and put the threaded
   code into method Main (override it). Then pass instance of this class to an
@@ -60,8 +60,6 @@ unit ConcurrentTasks;
   {$DEFINE FPC_DisableWarns}
   {$MACRO ON}
 {$ENDIF}
-
-{$TYPEINFO ON}
 
 interface
 
@@ -123,7 +121,6 @@ type
     procedure Cycle; virtual;
     procedure ProcessMessage(var Msg: TCNTSMessage); virtual;
     Function Main: Boolean; virtual; abstract;
-  published
     property Terminated: Boolean read GetTerminated write SetTerminated;
   end;
 
@@ -238,7 +235,6 @@ type
     Function GetRunningTaskCount: Integer; virtual;
     Function GetActiveTaskCount(CountPaused: Boolean = False): Integer; virtual;
     property Tasks[Index: Integer]: TCNTSTaskItem read GetTask; default;
-  published
     property TaskCount: Integer read GetTaskCount;
     property MaxConcurrentTasks: Integer read fMaxConcurrentTasks write SetMaxConcurrentTasks;
     property OnMessage: TCNTSMessageEvent read fOnMessage write fOnMessage;
