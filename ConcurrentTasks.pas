@@ -51,76 +51,81 @@
 ===============================================================================}
 unit ConcurrentTasks;
 
-{$IF not(Defined(WINDOWS) or Defined(MSWINDOWS))}
-  {$MESSAGE FATAL 'Unsupported operating system.'}
-{$IFEND}
+//{$IF not(Defined(WINDOWS) or Defined(MSWINDOWS))}
+//  {$MESSAGE FATAL 'Unsupported operating system.'}
+//{$IFEND}
 
 {$IFDEF FPC}
-  {$MODE Delphi}
+  {$MODE ObjFPC}
   {$DEFINE FPC_DisableWarns}
   {$MACRO ON}
 {$ENDIF}
+{$H+}
 
 interface
 
 uses
-  Classes,
-  AuxTypes, AuxClasses, Messanger, WinSyncObjs;
+  SysUtils, Classes,
+  AuxTypes, AuxClasses, Messanger, CrossSyncObjs;
 
 {===============================================================================
-    Messages
+    Library-specific exceptions
 ===============================================================================}
-
-const
-  CNTS_MSGR_ENDPOINT_MANAGER = 0;
-
-  CNTS_MSG_USER      = 0;
-  CNTS_MSG_TERMINATE = 1;
-  CNTS_MSG_PROGRESS  = 2;
-  CNTS_MSG_COMPLETED = 3;
-
 type
-  TCNTSMessageEndpoint = TMsgrEndpointID;
-  TCNTSMessageParam    = TMsgrParam;
-  TCNTSMessageResult   = TMsgrParam;
+  ECNSTException = class(Exception);
 
-  TCNTSMessage = record
-    Sender: TCNTSMessageEndpoint;
-    Param1: TCNTSMessageParam;
-    Param2: TCNTSMessageParam;
-    Result: TCNTSMessageResult;
-  end;
-
-  TCNTSMessageEvent = procedure(Sender: TObject; var Msg: TCNTSMessage) of object;
+  ECNSTIndexOutOfBounds = class(ECNSTException);
+  ECNTSInvalidValue     = class(ECNSTException);
 
 {===============================================================================
 --------------------------------------------------------------------------------
                                    TCNTSTask
 --------------------------------------------------------------------------------
 ===============================================================================}
+type
+  TCNTSTaskID = Integer;
+
+  // messaging
+  TCNTSMessageParam  = TMsgrParam;
+  TCNTSMessageResult = TMsgrParam;
+
+  TCNTSMessage = record
+    Param1: TCNTSMessageParam;
+    Param2: TCNTSMessageParam;
+    Result: TCNTSMessageResult;
+  end;
 
 {===============================================================================
-    TCNTSTask - declaration
+    TCNTSTask - class declaration
 ===============================================================================}
-
+type
   TCNTSTask = class(TCustomObject)
-  private
+  protected
+    fTaskID:        TCNTSTaskID;
     fCommEndpoint:  TMessangerEndpoint;
-    fPauseObject:   TEvent;
+    fPauseEvent:    TEvent;
     fTerminated:    Integer;
+    // getters, setters
     Function GetTerminated: Boolean;
     procedure SetTerminated(Value: Boolean);
-  protected
-    procedure MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags); virtual;
+    // internal methods (not to be called from user code)
+    procedure InternalMessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags); virtual;
+    procedure InternalSetup(TaskID: TCNTSTaskID; CommEndpoint: TMessangerEndpoint; PauseEvent: TEvent); virtual;
+    procedure InternalExecute; virtual;
+    // protected user methods
+    procedure ProcessMessage(var Msg: TCNTSMessage); virtual;
   public
-    procedure SetInternals(CommEndpoint: TMessangerEndpoint; PauseObject: TEvent);  // static
-    procedure Execute;                                                              // static
+    // public user methods
+    Function Main: Boolean; virtual; abstract;
+    // other public methods
+    procedure Terminate; virtual;    
     Function PostMessage(Param1,Param2: TCNTSMessageParam): Boolean; virtual;
     Function SendMessage(Param1,Param2: TCNTSMessageParam): TCNTSMessageResult; virtual;
+    procedure SignalStageProgress(Stage: Integer; Progress: Double); virtual;
     procedure SignalProgress(Progress: Double); virtual;
-    procedure Cycle; virtual;
-    procedure ProcessMessage(var Msg: TCNTSMessage); virtual;
-    Function Main: Boolean; virtual; abstract;
+    procedure Cycle(Timeout: UInt32 = 0); virtual;
+    // properties
+    property TaskID: TCNTSTaskID read fTaskID;
     property Terminated: Boolean read GetTerminated write SetTerminated;
   end;
 
@@ -129,19 +134,16 @@ type
                                   TCNTSThread
 --------------------------------------------------------------------------------
 ===============================================================================}
-
 {===============================================================================
-    TCNTSThread - declaration
+    TCNTSThread - class declaration
 ===============================================================================}
-
+type
   TCNTSThread = class(TThread)
-  private
-    fTaskObject:    TCNTSTask;
-    fCommEndpoint:  TMessangerEndpoint;
   protected
+    fTaskObject:  TCNTSTask;
     procedure Execute; override;
   public
-    constructor Create(TaskObject: TCNTSTask; CommEndpoint: TMessangerEndpoint; PauseObject: TEvent);
+    constructor Create(TaskObject: TCNTSTask);
   end;
 
 {===============================================================================
@@ -149,106 +151,171 @@ type
                                   TCNTSManager
 --------------------------------------------------------------------------------
 ===============================================================================}
-
+type
   TCNTSTaskState = (
-    tsReady,      // not running
-    tsRunning,    // running
-    tsQueued,     // not running, paused
-    tsPaused,     // running, paused
-    tsWaiting,    // running, paused internally (can be automatically unpaused)
-    tsCompleted,  // completed, returned true
-    tsAborted);   // completed, returned false
+    tsReady,        // never ran, can be automatically started, initial state
+    tsInactive,     // never ran, paused by user, cannot be automatically started
+    tsRunning,      // running
+    tsPaused,       // running, paused by user
+    tsQueued,       // running, paused by manager, can be automatically unpaused
+    tsStopping,     // running, task was stopped by the user
+    tsTerminating,  // running, manager is waiting for the thread to end
+    tsCompleted,    // completed, returned true
+    tsAborted);     // completed, returned false
 
   TCNTSTaskItem = record
-    State:      TCNTSTaskState;
-    TaskObject: TCNTSTask;
-    Progress:   Double;
+    TaskID:       TCNTSTaskID;  
+    TaskObject:   TCNTSTask;
+    TaskState:    TCNTSTaskState;
+    TaskStage:    Integer;
+    TaskProgress: Double;
   end;
-  PCNTSTaskItem = ^TCNTSTaskItem;
 
   TCNTSTaskItemFull = record
     PublicPart:     TCNTSTaskItem;
     CommEndpoint:   TMessangerEndpoint;
-    PauseObject:    TEvent;
+    CommEndpointID: TMsgrEndpointID;
+    PauseEvent:     TEvent;
     AssignedThread: TCNTSThread;
   end;
-  PCNTSTaskItemFull = ^TCNTSTaskItemFull;
-
-  TCNTSTasks = array of TCNTSTaskItemFull;
 
   TCNTSTaskEvent = procedure(Sender: TObject; TaskIndex: Integer) of object;
+  TCNTSTaskCallback = procedure(Sender: TObject; TaskIndex: Integer);
+
+  // task index points to a sender
+  TCNTSMessageEvent = procedure(Sender: TObject; TaskIndex: Integer; var Msg: TCNTSMessage) of object;
+  TCNTSMessageCallback = procedure(Sender: TObject; TaskIndex: Integer; var Msg: TCNTSMessage);
 
 {===============================================================================
-    TCNTSManager - declaration
+    TCNTSManager - class declaration
 ===============================================================================}
-{
-  Not derived from TCustomListObject because list growing and shrinking is not
-  of high importance in this class.
-}
-  TCNTSManager = class(TCustomObject)
-  private
-    fOwnsTaskObjects:     Boolean;
-    fTasks:               TCNTSTasks;
-    fMaxConcurrentTasks:  Integer;
-    fMessanger:           TMessanger;
-    fCommEndpoint:        TMessangerEndpoint;
-    fInternalAction:      Boolean;
-    fOnMessage:           TCNTSMessageEvent;
-    fOnTaskState:         TCNTSTaskEvent;
-    fOnTaskProgress:      TCNTSTaskEvent;
-    fOnTaskCompleted:     TCNTSTaskEvent;
-    fOnTaskRemove:        TCNTSTaskEvent;
-    fOnChange:            TNotifyEvent;
-    Function GetTaskCount: Integer;
-    Function GetTask(Index: Integer): TCNTSTaskItem;
-    procedure SetMaxConcurrentTasks(Value: Integer);
+type
+  TCNTSManager = class(TCustomListObject)
   protected
-    procedure MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags); virtual;
-    procedure ManageRunningTasks(IgnoreTask: Integer = -1); virtual;
+    fTasks:                       array of TCNTSTaskItemFull;
+    fTaskCount:                   Integer;
+    fOwnsTaskObjects:             Boolean;
+    fMaxConcurrentTasks:          Integer;
+    fMessanger:                   TMessanger;
+    fCommEndpoint:                TMessangerEndpoint;
+    // events
+    fOnTaskStateEvent:            TCNTSTaskEvent;
+    fOnTaskStateCallback:         TCNTSTaskCallback;
+    fOnTaskStageProgressEvent:    TCNTSTaskEvent;
+    fOnTaskStageProgressCallback: TCNTSTaskCallback;
+    fOnTaskProgressEvent:         TCNTSTaskEvent;
+    fOnTaskProgressCallback:      TCNTSTaskCallback;
+    fOnTaskCompleteEvent:         TCNTSTaskEvent;
+    fOnTaskCompleteCallback:      TCNTSTaskCallback;
+    fOnTaskRemovingEvent:         TCNTSTaskEvent;
+    fOnTaskRemovingCallback:      TCNTSTaskCallback;
+    fOnMessageEvent:              TCNTSMessageEvent;
+    fOnMessageCallback:           TCNTSMessageCallback;
+    fOnChangeEvent:               TNotifyEvent;
+    fOnChangeCallback:            TNotifyCallback;
+    // getters, setters
+    Function GetTask(Index: Integer): TCNTSTaskItem; virtual;
+    procedure SetMaxConcurrentTasks(Value: Integer); virtual;
+    // list methods
+    Function GetCapacity: Integer; override;
+    procedure SetCapacity(Value: Integer); override;
+    Function GetCount: Integer; override;
+    procedure SetCount(Value: Integer); override;
+    // events firing
+    procedure DoTaskState(TaskIndex: Integer); virtual;
+    procedure DoTaskStageProgress(TaskIndex: Integer); virtual;
+    procedure DoTaskProgress(TaskIndex: Integer); virtual;
+    procedure DoTaskComplete(TaskIndex: Integer); virtual;
+    procedure DoTaskRemoving(TaskIndex: Integer); virtual;
+    procedure DoMessage(TaskIndex: Integer; var Msg: TCNTSMessage); virtual;
+    procedure DoChange; virtual;
+    // management methods
+    procedure MessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags); virtual;
+    procedure ManageRunningTasks(IgnoredTask: Integer = -1); virtual;
+    procedure TerminateTask(TaskIndex: Integer); virtual;
+    procedure WaitAndFreeTask(TaskIndex: Integer); virtual;
+    procedure ManagedStartTask(TaskIndex: Integer); virtual;
+    procedure ManagedStopTask(TaskIndex: Integer); virtual;
+    // init, final
+    procedure Initialize(OwnsTaskObjects: Boolean); virtual;
+    procedure Finalize; virtual;
+    // internal processing
+    Function FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean; virtual;
   public
-    class Function GetProcessorCount: Integer; virtual;
+    class Function ProcessorCount: Integer; virtual;
     constructor Create(OwnsTaskObjects: Boolean = True);
     destructor Destroy; override;
-    procedure Update(WaitTimeOut: LongWord = 0); virtual;
-    Function LowIndex: Integer; virtual;
-    Function HighIndex: Integer; virtual;
+    Function LowIndex: Integer; override;
+    Function HighIndex: Integer; override;
     Function First: TCNTSTaskItem; virtual;
     Function Last: TCNTSTaskItem; virtual;
+    // list management
+    Function IndexOfTask(TaskID: TCNTSTaskID): Integer; overload; virtual;
     Function IndexOfTask(TaskObject: TCNTSTask): Integer; overload; virtual;
-    Function IndexOfTask(CommEndpointID: TCNTSMessageEndpoint): Integer; overload; virtual;
-    Function AddTask(TaskObject: TCNTSTask): Integer; virtual;
+    Function FindTask(TaskID: TCNTSTaskID; out TaskIndex: Integer): Boolean; overload; virtual;
+    Function FindTask(TaskObject: TCNTSTask; out TaskIndex: Integer): Boolean; overload; virtual;
+    Function AddTask(TaskID: TCNTSTaskID; TaskObject: TCNTSTask; Active: Boolean = True): Integer; overload; virtual;
+    Function AddTask(TaskObject: TCNTSTask; Active: Boolean = True): Integer; overload; virtual;
+  (*
     procedure Insert(Index: Integer; TaskObject: TCNTSTask); virtual;
     procedure Move(CurIdx, NewIdx: Integer); virtual;
     procedure Exchange(Index1, Index2: Integer); virtual;
-    Function RemoveTask(TaskObject: TCNTSTask): Integer; virtual;
-    procedure DeleteTask(TaskIndex: Integer); virtual;
     Function ExtractTask(TaskObject: TCNTSTask): TCNTSTask; virtual;
+
+    AdjustTaskThreadPriority(TaskIndex: Integer; ...)?
+  *)
+    Function RemoveTask(TaskID: TCNTSTaskID): Integer; overload; virtual;
+    Function RemoveTask(TaskObject: TCNTSTask): Integer; overload; virtual;
+    procedure DeleteTask(TaskIndex: Integer); virtual;
     procedure ClearTasks; virtual;
     procedure ClearCompletedTasks; virtual;
+    // task running management
     procedure StartTask(TaskIndex: Integer); virtual;
     procedure PauseTask(TaskIndex: Integer); virtual;
     procedure ResumeTask(TaskIndex: Integer); virtual;
     procedure StopTask(TaskIndex: Integer); virtual;
-    procedure WaitForRunningTasksToComplete; virtual;
+    // other task methods
+    Function RunningTasksCount: Integer; virtual;
+    procedure RunningTasksWaitFor; virtual;
+    Function UnfinishedTasksCount(CountPaused: Boolean = True): Integer; virtual;
+    // messaging
     Function PostMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): Boolean; virtual;
     Function SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult; virtual;
-    Function GetRunningTaskCount: Integer; virtual;
-    Function GetActiveTaskCount(CountPaused: Boolean = False): Integer; virtual;
+    procedure Update(Timeout: UInt32 = 0); virtual;
+    // properties
     property Tasks[Index: Integer]: TCNTSTaskItem read GetTask; default;
-    property TaskCount: Integer read GetTaskCount;
+    property TaskCount: Integer read GetCount;
+    property OwnsTaskObjects: Boolean read fOwnsTaskObjects write fOwnsTaskObjects;
     property MaxConcurrentTasks: Integer read fMaxConcurrentTasks write SetMaxConcurrentTasks;
-    property OnMessage: TCNTSMessageEvent read fOnMessage write fOnMessage;
-    property OnTaskState: TCNTSTaskEvent read fOnTaskState write fOnTaskState;
-    property OnTaskProgress: TCNTSTaskEvent read fOnTaskProgress write fOnTaskProgress;
-    property OnTaskCompleted: TCNTSTaskEvent read fOnTaskCompleted write fOnTaskCompleted; 
-    property OnTaskRemove: TCNTSTaskEvent read fOnTaskRemove write fOnTaskRemove;
-    property OnChange: TNotifyEvent read fOnChange write fOnChange;
+    // events
+    property OnTaskStateCallback: TCNTSTaskCallback read fOnTaskStateCallback write fOnTaskStateCallback;
+    property OnTaskStateEvent: TCNTSTaskEvent read fOnTaskStateEvent write fOnTaskStateEvent;
+    property OnTaskState: TCNTSTaskEvent read fOnTaskStateEvent write fOnTaskStateEvent;
+    property OnTaskStageProgressCallback: TCNTSTaskCallback read fOnTaskProgressCallback write fOnTaskProgressCallback;
+    property OnTaskStageProgressEvent: TCNTSTaskEvent read fOnTaskProgressEvent write fOnTaskProgressEvent;
+    property OnTaskStageProgress: TCNTSTaskEvent read fOnTaskProgressEvent write fOnTaskProgressEvent;
+    property OnTaskProgressEventCallback: TCNTSTaskCallback read fOnTaskProgressCallback write fOnTaskProgressCallback;
+    property OnTaskProgressEvent: TCNTSTaskEvent read fOnTaskProgressEvent write fOnTaskProgressEvent;
+    property OnTaskProgress: TCNTSTaskEvent read fOnTaskProgressEvent write fOnTaskProgressEvent;
+    property OnTaskCompleteCallback: TCNTSTaskCallback read fOnTaskCompleteCallback write fOnTaskCompleteCallback;
+    property OnTaskCompleteEvent: TCNTSTaskEvent read fOnTaskCompleteEvent write fOnTaskCompleteEvent;
+    property OnTaskComplete: TCNTSTaskEvent read fOnTaskCompleteEvent write fOnTaskCompleteEvent;
+    property OnTaskRemovingCallback: TCNTSTaskCallback read fOnTaskRemovingCallback write fOnTaskRemovingCallback;
+    property OnTaskRemovingEvent: TCNTSTaskEvent read fOnTaskRemovingEvent write fOnTaskRemovingEvent;
+    property OnTaskRemoving: TCNTSTaskEvent read fOnTaskRemovingEvent write fOnTaskRemovingEvent;
+    property OnMessageCallback: TCNTSMessageCallback read fOnMessageCallback write fOnMessageCallback;
+    property OnMessageEvent: TCNTSMessageEvent read fOnMessageEvent write fOnMessageEvent;
+    property OnMessage: TCNTSMessageEvent read fOnMessageEvent write fOnMessageEvent;
+    property OnChangeCallback: TNotifyCallback read fOnChangeCallback write fOnChangeCallback;
+    property OnChangeEvent: TNotifyEvent read fOnChangeEvent write fOnChangeEvent;
+    property OnChange: TNotifyEvent read fOnChangeEvent write fOnChangeEvent;
   end;
 
 implementation
 
 uses
-  Windows, SysUtils;
+  //Windows,
+  InterlockedOps;
 
 {$IFDEF FPC_DisableWarns}
   {$DEFINE FPCDWM}
@@ -260,94 +327,130 @@ uses
     External functions
 ===============================================================================}
 
-procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+//procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
 
 {===============================================================================
 --------------------------------------------------------------------------------
                                    TCNTSTask
 --------------------------------------------------------------------------------
 ===============================================================================}
+const
+  CNTS_MSGR_ENDPOINT_MANAGER = 0;
+
+  CNTS_MSG_USER           = 0;
+  CNTS_MSG_TERMINATE      = 1;
+  CNTS_MSG_PROGRESS       = 2;
+  CNTS_MSG_STAGEPROGRESS  = 3;
+  CNTS_MSG_COMPLETED      = 100;
 
 {===============================================================================
-    TCNTSTask - implementation
+    TCNTSTask - class implementation
 ===============================================================================}
-
 {-------------------------------------------------------------------------------
-    TCNTSTask - private methods
+    TCNTSTask - protected methods
 -------------------------------------------------------------------------------}
 
 Function TCNTSTask.GetTerminated: Boolean;
 begin
-Result := InterlockedExchangeAdd(fTerminated,0) <> 0;
+Result := InterlockedLoad(fTerminated) <> 0;
 end;
 
 //------------------------------------------------------------------------------
 
 procedure TCNTSTask.SetTerminated(Value: Boolean);
 begin
-If Value then InterlockedExchange(fTerminated,-1)
-  else InterlockedExchange(fTerminated,0);
+If Value then
+  InterlockedStore(fTerminated,-1)
+else
+  InterlockedStore(fTerminated,0);
 end;
 
-{-------------------------------------------------------------------------------
-    TCNTSTask - protected methods
--------------------------------------------------------------------------------}
+//------------------------------------------------------------------------------
 
-{$IFDEF FPCDWM}{$PUSH}W4055 W5024{$ENDIF}
-procedure TCNTSTask.MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags);
+procedure TCNTSTask.InternalMessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags);
 var
-  InternalMessage:  TCNTSMessage;
+  TempMessage:  TCNTSMessage;
 begin
 case Msg.Parameter1 of
   CNTS_MSG_USER:
     begin
-      InternalMessage.Sender := Msg.Sender;
-      InternalMessage.Param1 := Msg.Parameter2;
-      InternalMessage.Param2 := Msg.Parameter3;
-      InternalMessage.Result := 0;
-      ProcessMessage(InternalMessage);
-      If mdfSynchronousMessage in Flags then
-        TCNTSMessageResult(Pointer(Msg.Parameter4)^) := InternalMessage.Result;
+      TempMessage.Param1 := Msg.Parameter2;
+      TempMessage.Param2 := Msg.Parameter3;
+      TempMessage.Result := 0;
+      ProcessMessage(TempMessage);
+      If mdfSentMessage in Flags then
+        TCNTSMessageResult(Pointer(Msg.Parameter4)^) := TempMessage.Result;
     end;
   CNTS_MSG_TERMINATE:
-    Terminated := True;
+    Terminate;
 end;
 end;
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSTask.InternalSetup(TaskID: TCNTSTaskID; CommEndpoint: TMessangerEndpoint; PauseEvent: TEvent);
+begin
+fTaskID := TaskID;
+fCommEndpoint := CommEndpoint;
+fCommEndpoint.OnMessageEvent := InternalMessageHandler;
+fPauseEvent := PauseEvent;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSTask.InternalExecute;
+var
+  MainProcResult: Integer;
+begin
+Cycle(0); // process all messages received to this point
+If Main then // main processing
+  MainProcResult := -1
+else
+  MainProcResult := 0;
+fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_COMPLETED,TMsgrParam(MainProcResult),0,0);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSTask.ProcessMessage(var Msg: TCNTSMessage);
+begin
+Msg.Result := 0;
+end;
 
 {-------------------------------------------------------------------------------
     TCNTSTask - public methods
 -------------------------------------------------------------------------------}
 
-procedure TCNTSTask.SetInternals(CommEndpoint: TMessangerEndpoint; PauseObject: TEvent);
+procedure TCNTSTask.Terminate;
 begin
-fCommEndpoint := CommEndpoint;
-fCommEndpoint.OnMessageTraversing := MessageHandler;
-fPauseObject := PauseObject;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSTask.Execute;
-begin
-Cycle;
-fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_COMPLETED,Ord(Main),0,0)
+InterlockedStore(fTerminated,-1);
 end;
 
 //------------------------------------------------------------------------------
 
 Function TCNTSTask.PostMessage(Param1,Param2: TCNTSMessageParam): Boolean;
 begin
-Result := fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,0);
+Result := fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,0);
 end;
 
 //------------------------------------------------------------------------------
 
 Function TCNTSTask.SendMessage(Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
-{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-fCommEndpoint.SendMessageAndWait(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)));
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
+If not fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result))) then
+ Result := 0;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSTask.SignalStageProgress(Stage: Integer; Progress: Double);
+var
+  ValueLo:  TCNTSMessageParam;
+  ValueHi:  TCNTSMessageParam;
+begin
+ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
+ValueHi := TCNTSMessageParam(PUInt32(PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
+fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_STAGEPROGRESS,ValueLo,ValueHi,TCNTSMessageParam(Stage));
 end;
 
 //------------------------------------------------------------------------------
@@ -358,25 +461,16 @@ var
   ValueHi:  TCNTSMessageParam;
 begin
 ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
-{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 ValueHi := TCNTSMessageParam(PUInt32(PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
-fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,ValueLo,ValueHi,0);
+fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,ValueLo,ValueHi,0);
 end;
 
 //------------------------------------------------------------------------------
 
-procedure TCNTSTask.Cycle;
+procedure TCNTSTask.Cycle(Timeout: UInt32 = 0);
 begin
-fCommEndpoint.Cycle(0); // do not wait
-fPauseObject.WaitFor;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSTask.ProcessMessage(var Msg: TCNTSMessage);
-begin
-Msg.Result := 0;
+fCommEndpoint.Cycle(Timeout);
+fPauseEvent.Wait(INFINITE);
 end;
 
 
@@ -385,32 +479,28 @@ end;
                                   TCNTSThread
 --------------------------------------------------------------------------------
 ===============================================================================}
-
 {===============================================================================
-    TCNTSThread - declaration
+    TCNTSThread - class implementation
 ===============================================================================}
-
 {-------------------------------------------------------------------------------
     TCNTSThread - protected methods
 -------------------------------------------------------------------------------}
 
 procedure TCNTSThread.Execute;
 begin
-fTaskObject.Execute;
+fTaskObject.InternalExecute;
 end;
 
 {-------------------------------------------------------------------------------
     TCNTSThread - public methods
 -------------------------------------------------------------------------------}
 
-constructor TCNTSThread.Create(TaskObject: TCNTSTask; CommEndpoint: TMessangerEndpoint; PauseObject: TEvent);
+constructor TCNTSThread.Create(TaskObject: TCNTSTask);
 begin
 inherited Create(False);
 Priority := tpLower;
 FreeOnTerminate := False;
 fTaskObject := TaskObject;
-fCommEndpoint := CommEndpoint;
-fTaskObject.SetInternals(CommEndpoint,PauseObject);
 end;
 
 
@@ -419,28 +509,19 @@ end;
                                   TCNTSManager
 --------------------------------------------------------------------------------
 ===============================================================================}
-
 {===============================================================================
-    TCNTSManager - declaration
+    TCNTSManager - class implementation
 ===============================================================================}
-
 {-------------------------------------------------------------------------------
-    TCNTSManager - private methods
+    TCNTSManager - protected methods
 -------------------------------------------------------------------------------}
-
-Function TCNTSManager.GetTaskCount: Integer;
-begin
-Result := Length(fTasks);
-end;
-
-//------------------------------------------------------------------------------
 
 Function TCNTSManager.GetTask(Index: Integer): TCNTSTaskItem;
 begin
-If (Index >= Low(fTasks)) and (Index <= High(fTasks)) then
+If CheckIndex(Index) then
   Result := fTasks[Index].PublicPart
 else
-  raise Exception.CreateFmt('TCNTSManager.GetTask: Index(%d) out of bounds.',[Index]);
+  raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.GetTask: Index (%d) out of bounds.',[Index]);
 end;
 
 //------------------------------------------------------------------------------
@@ -452,119 +533,349 @@ If Value >= 1 then
     fMaxConcurrentTasks := Value;
     ManageRunningTasks;
   end
-else raise Exception.CreateFmt('TCNTSManager.SetMaxConcurrentTasks: Cannot assign value smaller than 1 (%d).',[Value]);
+else raise ECNTSInvalidValue.CreateFmt('TCNTSManager.SetMaxConcurrentTasks: Cannot assign value smaller than 1 (%d).',[Value]);
 end;
 
-{-------------------------------------------------------------------------------
-    TCNTSManager - protected methods
--------------------------------------------------------------------------------}
+//------------------------------------------------------------------------------
 
-procedure TCNTSManager.MessageHandler(Sender: TObject; Msg: TMsgrMessage; var Flags: TMsgrDispatchFlags);
+Function TCNTSManager.GetCapacity: Integer;
+begin
+Result := Length(fTasks);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.SetCapacity(Value: Integer);
+begin
+SetLength(fTasks,Value);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.GetCount: Integer;
+begin
+Result := fTaskCount;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.SetCount(Value: Integer);
+begin
+// do nothing
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoTaskState(TaskIndex: Integer);
+begin
+If Assigned(fOnTaskStateEvent) then
+  fOnTaskStateEvent(Self,TaskIndex)
+else If Assigned(fOnTaskStateCallback) then
+  fOnTaskStateCallback(Self,TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoTaskStageProgress(TaskIndex: Integer);
+begin
+If Assigned(fOnTaskStageProgressEvent) then
+  fOnTaskStageProgressEvent(Self,TaskIndex)
+else If Assigned(fOnTaskStageProgressCallback) then
+  fOnTaskStageProgressCallback(Self,TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoTaskProgress(TaskIndex: Integer);
+begin
+If Assigned(fOnTaskProgressEvent) then
+  fOnTaskProgressEvent(Self,TaskIndex)
+else If Assigned(fOnTaskProgressCallback) then
+  fOnTaskProgressCallback(Self,TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoTaskComplete(TaskIndex: Integer);
+begin
+If Assigned(fOnTaskCompleteEvent) then
+  fOnTaskCompleteEvent(Self,TaskIndex)
+else If Assigned(fOnTaskCompleteCallback) then
+  fOnTaskCompleteCallback(Self,TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoTaskRemoving(TaskIndex: Integer);
+begin
+If Assigned(fOnTaskRemovingEvent) then
+  fOnTaskRemovingEvent(Self,TaskIndex)
+else If Assigned(fOnTaskRemovingCallback) then
+  fOnTaskRemovingCallback(Self,TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoMessage(TaskIndex: Integer; var Msg: TCNTSMessage);
+begin
+If Assigned(fOnMessageEvent) then
+  fOnMessageEvent(Self,TaskIndex,Msg)
+else If Assigned(fOnMessageCallback) then
+  fOnMessageCallback(Self,TaskIndex,Msg);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DoChange;
+begin
+If Assigned(fOnChangeEvent) then
+  fOnChangeEvent(Self)
+else If Assigned(fOnChangeCallback) then
+  fOnChangeCallback(Self);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.MessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags);
 var
-  InternalMessage:  TCNTSMessage;
-  Index:            Integer;
+  TempMessage:  TCNTSMessage;
+  TaskIndex:    Integer;
+  PrgsBuffer:   Int64;
 begin
 case Msg.Parameter1 of
   CNTS_MSG_USER:
-    begin
-      InternalMessage.Sender := Msg.Sender;
-      InternalMessage.Param1 := Msg.Parameter2;
-      InternalMessage.Param2 := Msg.Parameter3;
-      InternalMessage.Result := 0;
-      If Assigned(fOnMessage) then
-        fOnMessage(Self,InternalMessage);
-      If mdfSynchronousMessage in Flags then
-      {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-        TCNTSMessageResult(Pointer(Msg.Parameter4)^) := InternalMessage.Result;
-      {$IFDEF FPCDWM}{$POP}{$ENDIF}
-    end;
+    If FindCommEndpoint(Msg.Sender,TaskIndex) then
+      begin
+        TempMessage.Param1 := Msg.Parameter2;
+        TempMessage.Param2 := Msg.Parameter3;
+        TempMessage.Result := 0;
+        DoMessage(TaskIndex,TempMessage);
+        If mdfSentMessage in Flags then
+          TCNTSMessageResult(Pointer(Msg.Parameter4)^) := TempMessage.Result;
+      end;
+  CNTS_MSG_STAGEPROGRESS:
+    If FindCommEndpoint(Msg.Sender,TaskIndex) then
+      begin
+        Int64Rec(PrgsBuffer).Lo := UInt32(Msg.Parameter2);
+        Int64Rec(PrgsBuffer).Hi := UInt32(Msg.Parameter3);
+        fTasks[TaskIndex].PublicPart.TaskProgress := Double(Addr(PrgsBuffer)^);
+        fTasks[TaskIndex].PublicPart.TaskStage := Integer(Msg.Parameter4);
+        DoTaskStageProgress(TaskIndex);
+      end;
   CNTS_MSG_PROGRESS:
-    begin
-      Index := IndexOfTask(Msg.Sender);
-      If Index >= 0 then
-        begin
-          UInt32(Addr(fTasks[Index].PublicPart.Progress)^) := UInt32(Msg.Parameter2);
-        {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-          PUInt32(PtrUInt(Addr(fTasks[Index].PublicPart.Progress)) + SizeOf(UInt32))^ := UInt32(Msg.Parameter3);
-        {$IFDEF FPCDWM}{$POP}{$ENDIF}
-          If Assigned(fOnTaskProgress) then
-            fOnTaskProgress(Sender,Index);
-        end;
-    end;
+    If FindCommEndpoint(Msg.Sender,TaskIndex) then
+      begin
+        Int64Rec(PrgsBuffer).Lo := UInt32(Msg.Parameter2);
+        Int64Rec(PrgsBuffer).Hi := UInt32(Msg.Parameter3);
+        fTasks[TaskIndex].PublicPart.TaskProgress := Double(Addr(PrgsBuffer)^);
+        DoTaskProgress(TaskIndex);
+      end;
   CNTS_MSG_COMPLETED:
     begin
-      Index := IndexOfTask(Msg.Sender);
-      If Index >= 0 then
+      If FindCommEndpoint(Msg.Sender,TaskIndex) then
         begin
-          If Assigned(fTasks[Index].AssignedThread) then
-            fTasks[Index].AssignedThread.WaitFor;
+          If Assigned(fTasks[TaskIndex].AssignedThread) then
+            fTasks[TaskIndex].AssignedThread.WaitFor;
           If Msg.Parameter2 <> 0 then
-            fTasks[Index].PublicPart.State := tsCompleted
+            fTasks[TaskIndex].PublicPart.TaskState := tsCompleted
           else
-            fTasks[Index].PublicPart.State := tsAborted;
-          If Assigned(fOnTaskState) then
-            fOnTaskState(Self,Index);
-          If Assigned(fOnTaskCompleted) then
-            fOnTaskCompleted(Self,Index);
-        end;
-      ManageRunningTasks;
+            fTasks[TaskIndex].PublicPart.TaskState := tsAborted;
+          DoTaskState(TaskIndex);
+          DoTaskComplete(TaskIndex);
+          ManageRunningTasks;
+        end
+      else ManageRunningTasks;
     end;
 end;
 end;
 
 //------------------------------------------------------------------------------
 
-procedure TCNTSManager.ManageRunningTasks(IgnoreTask: Integer = -1);
+procedure TCNTSManager.ManageRunningTasks(IgnoredTask: Integer = -1);
 var
   RunCount: Integer;
   i:        Integer;
 begin
-fInternalAction := True;
-try
-  RunCount := fMaxConcurrentTasks - GetRunningTaskCount;
-  If RunCount > 0 then
-    begin
-      For i := Low(fTasks) to High(fTasks) do
-        If RunCount > 0 then
-          begin
-            If (fTasks[i].PublicPart.State in [tsReady,tsWaiting]) and (i <> IgnoreTask) then
-              begin
-                StartTask(i);
-                Dec(RunCount);
-              end;
-          end
-        else Break{For i};
-    end
-  else If RunCount < 0 then
-    begin
-      For i := High(fTasks) downto Low(fTasks) do
-        If RunCount < 0 then
-          begin
-            If (fTasks[i].PublicPart.State = tsRunning) and (i <> IgnoreTask) then
-              begin
-                PauseTask(i);
-                Inc(RunCount);
-              end;
-          end
-        else Break{For i};
-    end;
-finally
-  fInternalAction := False;
+RunCount := fMaxConcurrentTasks - RunningTasksCount;
+If RunCount > 0 then
+  begin
+    For i := LowIndex to HighIndex do
+      If RunCount > 0 then
+        begin
+          If (fTasks[i].PublicPart.TaskState in [tsReady,tsQueued]) and (i <> IgnoredTask) then
+            begin
+              ManagedStartTask(i);
+              Dec(RunCount);
+            end;
+        end
+      else Break{For i};
+  end
+else If RunCount < 0 then
+  begin
+    For i := HighIndex downto LowIndex do
+      If RunCount < 0 then
+        begin
+          If (fTasks[i].PublicPart.TaskState = tsRunning) and (i <> IgnoredTask) then
+            begin
+              ManagedStopTask(i);
+              Inc(RunCount);
+            end;
+        end
+      else Break{For i};
+  end;
 end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.TerminateTask(TaskIndex: Integer);
+begin
+case fTasks[TaskIndex].PublicPart.TaskState of
+  tsReady,
+  tsInactive:
+    fTasks[TaskIndex].PublicPart.TaskState := tsAborted;
+  tsRunning:
+    begin
+      fCommEndpoint.PostMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_TERMINATE,0,0,0,MSGR_PRIORITY_ABSOLUTE);
+      fTasks[TaskIndex].PublicPart.TaskState := tsTerminating;
+    end;
+  tsPaused,
+  tsQueued:
+    begin
+      fCommEndpoint.PostMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_TERMINATE,0,0,0,MSGR_PRIORITY_ABSOLUTE);
+      fTasks[TaskIndex].PauseEvent.Unlock;
+      fTasks[TaskIndex].PublicPart.TaskState := tsTerminating;
+    end;
+end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.WaitAndFreeTask(TaskIndex: Integer);
+begin
+If Assigned(fTasks[TaskIndex].AssignedThread) then
+  begin
+    // wait for task to truly exit
+    fTasks[TaskIndex].AssignedThread.WaitFor;
+    fTasks[TaskIndex].AssignedThread.Free;
+  end;
+fTasks[TaskIndex].CommEndpoint.Free;
+fTasks[TaskIndex].PauseEvent.Free;
+If fOwnsTaskObjects then
+  fTasks[TaskIndex].PublicPart.TaskObject.Free
+else
+  DoTaskRemoving(TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ManagedStartTask(TaskIndex: Integer);
+begin
+case fTasks[TaskIndex].PublicPart.TaskState of
+  tsReady:  begin
+              fTasks[TaskIndex].PublicPart.TaskObject.InternalSetup(
+                fTasks[TaskIndex].PublicPart.TaskID,
+                fTasks[TaskIndex].CommEndpoint,
+                fTasks[TaskIndex].PauseEvent);
+              fTasks[TaskIndex].AssignedThread := TCNTSThread.Create(fTasks[TaskIndex].PublicPart.TaskObject);
+              fTasks[TaskIndex].PublicPart.TaskState := tsRunning;
+              DoTaskState(TaskIndex);
+            end;
+  tsQueued: begin
+              fTasks[TaskIndex].PauseEvent.Unlock;
+              fTasks[TaskIndex].PublicPart.TaskState := tsRunning;
+              DoTaskState(TaskIndex);
+            end;
+end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ManagedStopTask(TaskIndex: Integer);
+begin
+If fTasks[TaskIndex].PublicPart.TaskState = tsRunning then
+  begin
+    fTasks[TaskIndex].PauseEvent.Lock;
+    fTasks[TaskIndex].PublicPart.TaskState := tsQueued;
+    DoTaskState(TaskIndex);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Initialize(OwnsTaskObjects: Boolean);
+begin
+SetLength(fTasks,0);
+fTaskCount := 0;
+fOwnsTaskObjects := OwnsTaskObjects;
+fMaxConcurrentTasks := ProcessorCount;
+fMessanger := TMessanger.Create(1024);
+fCommEndpoint := fMessanger.CreateEndpoint(CNTS_MSGR_ENDPOINT_MANAGER);
+fCommEndpoint.OnMessage := MessageHandler;
+// init events
+fOnTaskStateEvent := nil;
+fOnTaskStateCallback := nil;
+fOnTaskStageProgressEvent := nil;
+fOnTaskStageProgressCallback := nil;
+fOnTaskProgressEvent := nil;
+fOnTaskProgressCallback := nil;
+fOnTaskCompleteEvent := nil;
+fOnTaskCompleteCallback := nil;
+fOnTaskRemovingEvent := nil;
+fOnTaskRemovingCallback := nil;
+fOnMessageEvent := nil;
+fOnMessageCallback := nil;
+fOnChangeEvent := nil;
+fOnChangeCallback := nil;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Finalize;
+begin
+// prevent events firing (except for task removal)
+fOnTaskStateEvent := nil;
+fOnTaskStateCallback := nil;
+fOnTaskStageProgressEvent := nil;
+fOnTaskStageProgressCallback := nil;
+fOnTaskProgressEvent := nil;
+fOnTaskProgressCallback := nil;
+fOnTaskCompleteEvent := nil;
+fOnTaskCompleteCallback := nil;
+fOnMessageEvent := nil;
+fOnMessageCallback := nil;
+fOnChangeEvent := nil;
+fOnChangeCallback := nil;
+// clear
+ClearTasks;
+fCommEndpoint.Free;
+fMessanger.Free;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean;
+var
+  i:  Integer;
+begin
+Result := False;
+TaskIndex := -1;
+For i := LowIndex to HighIndex do
+  If Assigned(fTasks[i].CommEndpoint) then
+    If fTasks[i].CommEndpoint.EndpointID = CommIndpointID then
+      begin
+        TaskIndex := i;
+        Result := True;
+        Break{For i};
+      end;
 end;
 
 {-------------------------------------------------------------------------------
     TCNTSManager - public methods
 -------------------------------------------------------------------------------}
 
-class Function TCNTSManager.GetProcessorCount: Integer;
-var
-  SysInfo:  TSystemInfo;
+class Function TCNTSManager.ProcessorCount: Integer;
 begin
-GetNativeSystemInfo(@SysInfo);
-Result := Integer(SysInfo.dwNumberOfProcessors);
-If Result < 1 then
-  Result := 1;
+Result := 1;
 end;
 
 //------------------------------------------------------------------------------
@@ -572,32 +883,15 @@ end;
 constructor TCNTSManager.Create(OwnsTaskObjects: Boolean = True);
 begin
 inherited Create;
-fOwnsTaskObjects := OwnsTaskObjects;
-SetLength(fTasks,0);
-fMaxConcurrentTasks := GetProcessorCount;
-fMessanger := TMessanger.Create;
-fCommEndpoint := fMessanger.CreateEndpoint(0);
-fCommEndpoint.OnMessageTraversing := MessageHandler;
-fInternalAction := False;
+Initialize(OwnsTaskObjects);
 end;
 
 //------------------------------------------------------------------------------
 
 destructor TCNTSManager.Destroy;
 begin
-ClearTasks;
-fCommEndpoint.Free;
-fMessanger.Free;
-SetLength(fTasks,0);
+Finalize;
 inherited;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.Update(WaitTimeOut: LongWord = 0);
-begin
-fCommEndpoint.Cycle(WaitTimeOut);
-ManageRunningTasks;
 end;
 
 //------------------------------------------------------------------------------
@@ -611,7 +905,7 @@ end;
 
 Function TCNTSManager.HighIndex: Integer;
 begin
-Result := High(fTasks);
+Result := Pred(fTaskCount);
 end;
 
 //------------------------------------------------------------------------------
@@ -630,28 +924,13 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function TCNTSManager.IndexOfTask(TaskObject: TCNTSTask): Integer;
+Function TCNTSManager.IndexOfTask(TaskID: TCNTSTaskID): Integer;
 var
   i:  Integer;
 begin
 Result := -1;
-For i := Low(fTasks) to High(fTasks) do
-  If fTasks[i].PublicPart.TaskObject = TaskObject then
-    begin
-      Result := i;
-      Break;
-    end;
-end;
-
-//--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
-
-Function TCNTSManager.IndexOfTask(CommEndpointID: TCNTSMessageEndpoint): Integer;
-var
-  i:  Integer;
-begin
-Result := -1;
-For i := Low(fTasks) to High(fTasks) do
-  If fTasks[i].CommEndpoint.EndpointID = CommEndpointID then
+For i := LowIndex to HighIndex do
+  If fTasks[i].PublicPart.TaskID = TaskID then
     begin
       Result := i;
       Break;
@@ -660,25 +939,321 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function TCNTSManager.AddTask(TaskObject: TCNTSTask): Integer;
+Function TCNTSManager.IndexOfTask(TaskObject: TCNTSTask): Integer;
+var
+  i:  Integer;
+begin
+Result := -1;
+For i := LowIndex to HighIndex do
+  If fTasks[i].PublicPart.TaskObject = TaskObject then
+    begin
+      Result := i;
+      Break;
+    end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.FindTask(TaskID: TCNTSTaskID; out TaskIndex: Integer): Boolean;
+begin
+TaskIndex := IndexOfTask(TaskID);
+Result := CheckIndex(TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.FindTask(TaskObject: TCNTSTask; out TaskIndex: Integer): Boolean;
+begin
+TaskIndex := IndexOfTask(TaskObject);
+Result := CheckIndex(TaskIndex);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.AddTask(TaskID: TCNTSTaskID; TaskObject: TCNTSTask; Active: Boolean = True): Integer;
 var
   NewTaskItem:  TCNTSTaskItemFull;
 begin
-NewTaskItem.PublicPart.State := tsReady;
+NewTaskItem.PublicPart.TaskID := TaskID;
 NewTaskItem.PublicPart.TaskObject := TaskObject;
-NewTaskItem.PublicPart.Progress := 0.0;
+If Active then
+  NewTaskItem.PublicPart.TaskState := tsReady
+else
+  NewTaskItem.PublicPart.TaskState := tsInactive;
+NewTaskItem.PublicPart.TaskStage := 0;
+NewTaskItem.PublicPart.TaskProgress := 0.0;
 NewTaskItem.CommEndpoint := fMessanger.CreateEndpoint;
-NewTaskItem.PauseObject := TEvent.Create(nil,True,True,'');
+NewTaskItem.CommEndpointID := NewTaskItem.CommEndpoint.EndpointID;
+NewTaskItem.PauseEvent := TEvent.Create(True,True);
 // thread is created only when the task is started
 NewTaskItem.AssignedThread := nil;
-SetLength(fTasks,Length(fTasks) + 1);
-Result := High(fTasks);
+Grow;
+Result := fTaskCount;
 fTasks[Result] := NewTaskItem;
-If Assigned(fOnChange) then
-  fOnChange(Self);
-If Assigned(fOnTaskState) then
-  fOnTaskState(Self,Result);
+Inc(fTaskCount);
+DoChange;
+DoTaskState(Result);
 ManageRunningTasks;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function TCNTSManager.AddTask(TaskObject: TCNTSTask; Active: Boolean = True): Integer;
+begin
+Result := AddTask(0,TaskObject,Active);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.RemoveTask(TaskID: TCNTSTaskID): Integer;
+begin
+If FindTask(TaskID,Result) then
+  DeleteTask(Result);
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function TCNTSManager.RemoveTask(TaskObject: TCNTSTask): Integer;
+begin
+If FindTask(TaskObject,Result) then
+  DeleteTask(Result);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.DeleteTask(TaskIndex: Integer);
+var
+  i:  Integer;
+begin
+If CheckIndex(TaskIndex) then
+  begin
+    TerminateTask(TaskIndex);
+    WaitAndFreeTask(TaskIndex);
+    For i := TaskIndex to Pred(HighIndex) do
+      fTasks[i] := fTasks[i + 1];
+    Dec(fTaskCount);
+    Shrink;
+    DoChange;
+    // dipose of received but unprocessed messages sent by the deleted task
+    Update;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.DeleteTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ClearTasks;
+var
+  i:  Integer;
+begin
+For i := LowIndex to HighIndex do
+  TerminateTask(i);
+For i := HighIndex downto LowIndex do
+  WaitAndFreeTask(i);
+fTaskCount := 0;
+Shrink;
+DoChange;
+Update;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ClearCompletedTasks;
+var
+  i,j:  Integer;
+begin
+For i := HighIndex downto LowIndex do
+  If fTasks[i].PublicPart.TaskState = tsCompleted then
+    begin
+      WaitAndFreeTask(i);
+      For j := i to Pred(HighIndex) do
+        fTasks[j] := fTasks[j + 1];
+      Dec(fTaskCount);
+    end;
+Shrink;
+DoChange;
+Update;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.StartTask(TaskIndex: Integer);
+begin
+If CheckIndex(TaskIndex) then
+  begin
+    If fTasks[TaskIndex].PublicPart.TaskState = tsReady then
+      begin
+        fTasks[TaskIndex].PublicPart.TaskObject.InternalSetup(
+          fTasks[TaskIndex].PublicPart.TaskID,
+          fTasks[TaskIndex].CommEndpoint,
+          fTasks[TaskIndex].PauseEvent);
+        fTasks[TaskIndex].AssignedThread := TCNTSThread.Create(fTasks[TaskIndex].PublicPart.TaskObject);
+        fTasks[TaskIndex].PublicPart.TaskState := tsRunning;
+        DoTaskState(TaskIndex);
+        ManageRunningTasks(TaskIndex);
+      end;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.PauseTask(TaskIndex: Integer);
+begin
+If CheckIndex(TaskIndex) then
+  case fTasks[TaskIndex].PublicPart.TaskState of
+    tsReady:
+      begin
+        fTasks[TaskIndex].PublicPart.TaskState := tsInactive;
+        DoTaskState(TaskIndex);
+      end;
+    tsRunning:
+      begin
+        fTasks[TaskIndex].PublicPart.TaskState := tsPaused;
+        fTasks[TaskIndex].PauseEvent.Lock;
+        DoTaskState(TaskIndex);
+        ManageRunningTasks(TaskIndex);
+      end;
+    tsQueued:
+      begin
+        fTasks[TaskIndex].PublicPart.TaskState := tsPaused;
+        DoTaskState(TaskIndex);
+      end;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.PauseTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ResumeTask(TaskIndex: Integer);
+begin
+If CheckIndex(TaskIndex) then
+  case fTasks[TaskIndex].PublicPart.TaskState of
+    tsInactive:
+      begin
+        fTasks[TaskIndex].PublicPart.TaskState := tsReady;
+        DoTaskState(TaskIndex);
+      end;
+    tsPaused,
+    tsQueued:
+      begin
+        fTasks[TaskIndex].PublicPart.TaskState := tsRunning;
+        fTasks[TaskIndex].PauseEvent.Unlock;
+        DoTaskState(TaskIndex);
+        ManageRunningTasks(TaskIndex);
+      end;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.ResumeTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.StopTask(TaskIndex: Integer);
+begin
+If CheckIndex(TaskIndex) then
+  case fTasks[TaskIndex].PublicPart.TaskState of
+    tsRunning:
+      begin
+        fCommEndpoint.PostMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_TERMINATE,0,0,0);
+        fTasks[TaskIndex].PublicPart.TaskState := tsStopping;
+        DoTaskState(TaskIndex);
+      end;
+    tsPaused,
+    tsQueued:
+      begin
+        fCommEndpoint.PostMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_TERMINATE,0,0,0);
+        fTasks[TaskIndex].PublicPart.TaskState := tsStopping;
+        fTasks[TaskIndex].PauseEvent.Unlock;
+        DoTaskState(TaskIndex);
+        ManageRunningTasks(TaskIndex);
+      end;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.StopTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.RunningTasksCount: Integer;
+var
+  i:  Integer;
+begin
+Result := 0;
+For i := LowIndex to HighIndex do
+  If fTasks[i].PublicPart.TaskState = tsRunning then
+    Inc(Result);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.RunningTasksWaitFor;
+var
+  i:  Integer;
+begin
+For i := LowIndex to HighIndex do
+  If (fTasks[i].PublicPart.TaskState = tsRunning) and Assigned(fTasks[i].AssignedThread) then
+    fTasks[i].AssignedThread.WaitFor;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.UnfinishedTasksCount(CountPaused: Boolean = True): Integer;
+var
+  i:  Integer;
+begin
+Result := 0;
+For i := LowIndex to HighIndex do
+  begin
+    If fTasks[i].PublicPart.TaskState in [tsReady,tsRunning,tsStopping,tsTerminating] then
+      Inc(Result);
+    If CountPaused and (fTasks[i].PublicPart.TaskState in [tsInactive,tsPaused,tsQueued]) then
+      Inc(Result);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.PostMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): Boolean;
+begin
+If CheckIndex(TaskIndex) then
+  Result := fCommEndpoint.PostMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_USER,Param1,Param2,0)
+else
+  raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.PostMessage: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
+begin
+If CheckIndex(TaskIndex) then
+  fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)))
+else
+  raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.SendMessage: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.Update(Timeout: UInt32 = 0);
+begin
+fCommEndpoint.Cycle(Timeout);
+end;
+
+
+
+(*
+
+
+{-------------------------------------------------------------------------------
+    TCNTSManager - public methods
+-------------------------------------------------------------------------------}
+
+class Function TCNTSManager.GetProcessorCount: Integer;
+var
+  SysInfo:  TSystemInfo;
+begin
+GetNativeSystemInfo(@SysInfo);
+Result := Integer(SysInfo.dwNumberOfProcessors);
+If Result < 1 then
+  Result := 1;
 end;
 
 //------------------------------------------------------------------------------
@@ -760,50 +1335,6 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function TCNTSManager.RemoveTask(TaskObject: TCNTSTask): Integer;
-begin
-Result := IndexOfTask(TaskObject);
-If Result >= 0 then DeleteTask(Result);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.DeleteTask(TaskIndex: Integer);
-var
-  i:  Integer;
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  begin
-    If not(fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused,tsWaiting]) then
-      begin
-        If Assigned(fTasks[TaskIndex].AssignedThread) then
-          begin
-            fTasks[TaskIndex].AssignedThread.WaitFor;
-            FreeAndNil(fTasks[TaskIndex].AssignedThread);
-          end;
-        If Assigned(fTasks[TaskIndex].CommEndpoint) then
-          begin
-            fTasks[TaskIndex].CommEndpoint.OnMessageTraversing := nil;
-            FreeAndNil(fTasks[TaskIndex].CommEndpoint);
-          end;
-        fTasks[TaskIndex].PauseObject.Free;
-        If fOwnsTaskObjects then
-          fTasks[TaskIndex].PublicPart.TaskObject.Free
-        else
-          If Assigned(fOnTaskRemove) then fOnTaskRemove(Self,TaskIndex);
-        For i := TaskIndex to Pred(High(fTasks)) do
-          fTasks[i] := fTasks[i + 1];
-        SetLength(fTasks,Length(fTasks) - 1);
-        If Assigned(fOnChange) then
-          fOnChange(Self);
-      end
-    else raise Exception.CreateFmt('TCNTSManager.DeleteTask: Cannot delete running task (#%d).',[TaskIndex]);
-  end
-else raise Exception.CreateFmt('TCNTSManager.DeleteTask: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
 Function TCNTSManager.ExtractTask(TaskObject: TCNTSTask): TCNTSTask;
 var
   Index:  Integer;
@@ -837,209 +1368,6 @@ If Index >= 0 then
 else Result := nil;
 end;
 
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.ClearTasks;
-var
-  i:      Integer;
-  OldMCT: Integer;
-begin
-OldMCT := fMaxConcurrentTasks;
-fMaxConcurrentTasks := High(fMaxConcurrentTasks);
-try
-  For i := Low(fTasks) to High(fTasks) do
-    If fTasks[i].PublicPart.State in [tsPaused,tsWaiting] then
-      ResumeTask(i);
-  For i := High(fTasks) downto Low(fTasks) do
-    begin
-      If fTasks[i].PublicPart.State = tsRunning then
-        begin
-          fTasks[i].PublicPart.TaskObject.Terminated := True;
-          fTasks[i].AssignedThread.WaitFor;
-        end;
-      fCommEndpoint.Cycle(0);
-      DeleteTask(i);
-    end;
-  If Assigned(fOnChange) then
-    fOnChange(Self);
-finally
-  fMaxConcurrentTasks := OldMCT;
-end;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.ClearCompletedTasks;
-var
-  i:  Integer;
-begin
-Update;
-For i := High(fTasks) downto Low(fTasks) do
-  If fTasks[i].PublicPart.State = tsCompleted then
-    DeleteTask(i);
-If Assigned(fOnChange) then
-  fOnChange(Self);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.StartTask(TaskIndex: Integer);
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  case fTasks[TaskIndex].PublicPart.State of
-    tsReady:
-      begin
-        fTasks[TaskIndex].PublicPart.State := tsRunning;
-        fTasks[TaskIndex].AssignedThread :=
-          TCNTSThread.Create(fTasks[TaskIndex].PublicPart.TaskObject,
-                             fTasks[TaskIndex].CommEndpoint,
-                             fTasks[TaskIndex].PauseObject);
-        ManageRunningTasks(TaskIndex);
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-      end;
-    tsQueued,
-    tsPaused,
-    tsWaiting:
-      ResumeTask(TaskIndex);
-  end
-else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.PauseTask(TaskIndex: Integer);
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  case fTasks[TaskIndex].PublicPart.State of
-    tsReady:
-      begin
-        fTasks[TaskIndex].PublicPart.State := tsQueued;
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-      end;
-    tsRunning:
-      begin
-        If fInternalAction then
-          fTasks[TaskIndex].PublicPart.State := tsWaiting
-        else
-          fTasks[TaskIndex].PublicPart.State := tsPaused;
-        fTasks[TaskIndex].PauseObject.ResetEvent;
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-        ManageRunningTasks;
-      end;
-    tsWaiting:
-      begin
-        fTasks[TaskIndex].PublicPart.State := tsPaused;
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-      end;
-  end
-else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.ResumeTask(TaskIndex: Integer);
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  case fTasks[TaskIndex].PublicPart.State of
-    tsQueued:
-      begin
-        fTasks[TaskIndex].PublicPart.State := tsReady;
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-      end;
-    tsPaused,
-    tsWaiting:
-      begin
-        fTasks[TaskIndex].PublicPart.State := tsRunning;
-        fTasks[TaskIndex].PauseObject.SetEvent;
-        ManageRunningTasks(TaskIndex);
-        If Assigned(fOnTaskState) then
-          fOnTaskState(Self,TaskIndex);
-      end;
-  end
-else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.StopTask(TaskIndex: Integer);
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  begin
-    If fTasks[TaskIndex].PublicPart.State in [tsRunning,tsPaused,tsWaiting] then
-      begin
-        fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_TERMINATE,0,0,0);
-        fTasks[TaskIndex].PublicPart.TaskObject.Terminated := True;
-        ResumeTask(TaskIndex);
-      end;
-  end
-else raise Exception.CreateFmt('TCNTSManager.StartTask: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.WaitForRunningTasksToComplete;
-var
-  i:  Integer;
-begin
-For i := Low(fTasks) to High(fTasks) do
-  If fTasks[i].PublicPart.State = tsRunning then
-    fTasks[i].AssignedThread.WaitFor;
-fCommEndpoint.Cycle(0);
-end;
-
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.PostMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): Boolean;
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-  Result := fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_USER,Param1,Param2,0)
-else
-  raise Exception.CreateFmt('TCNTSManager.PostMessage: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
-begin
-If (TaskIndex >= Low(fTasks)) and (TaskIndex <= High(fTasks)) then
-{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
-  fCommEndpoint.SendMessageAndWait(fTasks[TaskIndex].CommEndpoint.EndpointID,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)))
-{$IFDEF FPCDWM}{$POP}{$ENDIF}
-else
-  raise Exception.CreateFmt('TCNTSManager.PostMessage: Index (%d) out of bounds.',[TaskIndex]);
-end;
-
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.GetRunningTaskCount: Integer;
-var
-  i:  Integer;
-begin
-Result := 0;
-For i := Low(fTasks) to High(fTasks) do
-  If fTasks[i].PublicPart.State = tsRunning then
-    Inc(Result);
-end;
-
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.GetActiveTaskCount(CountPaused: Boolean = False): Integer;
-var
-  i:  Integer;
-begin
-Result := 0;
-For i := Low(fTasks) to High(fTasks) do
-  begin
-    If fTasks[i].PublicPart.State in [tsReady,tsRunning] then
-      Inc(Result)
-    else If CountPaused and (fTasks[i].PublicPart.State in [tsQueued,tsPaused,tsWaiting]) then
-      Inc(Result);    
-  end;
-end;
+*)
 
 end.
