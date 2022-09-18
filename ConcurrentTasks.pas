@@ -9,54 +9,109 @@
 
   Concurrent tasks
 
-  ©František Milt 2018-10-21
+    Simple library providing means for running and controlling multiple
+    separate tasks run in threads (each task in its own thread).
 
-  Version 1.1.3
+    To use this unit, create a descendant of class TCNTSTask and put the
+    main processing code into method Main (override it). Then pass instance of
+    this class to an instance of TCNTSManager. Manager will automatically start
+    the task when running resources get available, or you can start the task
+    manually (this can pause other task if there are no running slots
+    available).
+    You can call any public method of TCNTSTask from Main, but remember that
+    the code is running in its own thread, so protect any shared data you want
+    to access, tasks don't have any mean of thread-safety and data integrity
+    protection.
 
-  To use this unit, create a descendant of class TCNTSTask and put the threaded
-  code into method Main (override it). Then pass instance of this class to an
-  instance of TCNTSManager. Manager will automatically start the task when
-  resources get available, or you can start the task manually (this will pause
-  other task when there are no running slots available).
-  You can call any public method of TCNTSTask from Main, but remember to protect
-  any shared data you want to use, tasks don't have any mean of thread-safety
-  protection. In Main, you should call method Cycle regularly if you want to use
-  integrated messaging system (in that case, also remember to override method
-  ProcessMessage - put a code that will process incoming messages there).
+    In Main, you should call method Cycle regularly, this ensures the task
+    responds to requests from the manager and also enables ther intergrated
+    messaging system (which is also used for progress signalling). If you want
+    to react to incoming messages, override task's protected method
+    ProcessMessage.
+    Remember that the messaging system is strictly server-client in nature.
+    Meaning any message sent from a task will arrive to the manager. To enable
+    message processing and progress reporting in the manager, make sure to call
+    method Update regularly (this method receives and dispatches messages sent
+    from all individual tasks).
 
-  The implementation of method Main is entirely up to you, but suggested
-  template is as follows:
+    The implementation of method Main is entirely up to you, but suggested
+    template would be as follows:
 
-    Function TTestTask.Main: Boolean;
-    begin
-      while not Terminated do
+        Function TTestTask.Main: Boolean;
         begin
-          Cycle;
-          [user code]
-          [progress signalling]
+          while not Terminated do
+            begin
+              Cycle;
+              [user code]
+              [progress signalling]
+            end;
+          Result := not Terminated;
         end;
-      Result := not Terminated;
-    end;
 
- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -    
+  Version 1.2 alfa (tested, but incomplete) (2022-09-18)
+
+  Last change 2022-09-18
+
+  ©2017-2022 František Milt
+
+  Contacts:
+    František Milt: frantisek.milt@gmail.com
+
+  Support:
+    If you find this code useful, please consider supporting its author(s) by
+    making a small donation using the following link(s):
+
+      https://www.paypal.me/FMilt
+
+  Changelog:
+    For detailed changelog and history please refer to this git repository:
+
+      github.com/TheLazyTomcat/Lib.ConcurrentTasks
 
   Dependencies:
-    AuxTypes    - github.com/ncs-sniper/Lib.AuxTypes
-    AuxClasses  - github.com/ncs-sniper/Lib.AuxClasses
-    Messanger   - github.com/ncs-sniper/Lib.Messanger
-    MemVector   - github.com/ncs-sniper/Lib.MemVector
-    WinSyncObjs - github.com/ncs-sniper/Lib.WinSyncObjs
-    StrRect     - github.com/ncs-sniper/Lib.StrRect
+    AuxTypes           - github.com/TheLazyTomcat/Lib.AuxTypes
+    AuxClasses         - github.com/TheLazyTomcat/Lib.AuxClasses
+    BitOps             - github.com/TheLazyTomcat/Lib.BitOps
+  * BitVector          - github.com/TheLazyTomcat/Lib.BitVector
+    CrossSyncObjs      - github.com/TheLazyTomcat/Lib.CrossSyncObjs
+    HashBase           - github.com/TheLazyTomcat/Lib.HashBase
+    InterlockedOps     - github.com/TheLazyTomcat/Lib.InterlockedOps
+  * LinSyncObjs        - github.com/TheLazyTomcat/Lib.LinSyncObjs
+    ListSorters        - github.com/TheLazyTomcat/Lib.ListSorters
+    MemVector          - github.com/TheLazyTomcat/Lib.MemVector
+    NamedSharedItems   - github.com/TheLazyTomcat/Lib.NamedSharedItems
+    SHA1               - github.com/TheLazyTomcat/Lib.SHA1
+    SharedMemoryStream - github.com/TheLazyTomcat/Lib.SharedMemoryStream
+  * SimpleCPUID        - github.com/TheLazyTomcat/Lib.SimpleCPUID
+  * SimpleFutex        - github.com/TheLazyTomcat/Lib.SimpleFutex
+    StaticMemoryStream - github.com/TheLazyTomcat/Lib.StaticMemoryStream
+    StrRect            - github.com/TheLazyTomcat/Lib.StrRect
+  * UInt64Utils        - github.com/TheLazyTomcat/Lib.UInt64Utils
+  * WinSyncObjs        - github.com/TheLazyTomcat/Lib.WinSyncObjs
+
+  Libraries UInt64Utils and WinSyncObjs are required only when compiling for
+  Windows OS.
+
+  Libraries BitVector, LinSyncObjs and SimpleFutex are required only when
+  compiling for Linux OS.
+
+  Library SimpleCPUID might not be required when compiling for Windows OS,
+  depending on defined symbols in InterlockedOps and BitOps libraries.
 
 ===============================================================================}
 unit ConcurrentTasks;
 
-//{$IF not(Defined(WINDOWS) or Defined(MSWINDOWS))}
-//  {$MESSAGE FATAL 'Unsupported operating system.'}
-//{$IFEND}
+{$IF Defined(WINDOWS) or Defined(MSWINDOWS)}
+  {$DEFINE Windows}
+{$ELSEIF Defined(LINUX) and Defined(FPC)}
+  {$DEFINE Linux}
+{$ELSE}
+  {$MESSAGE FATAL 'Unsupported operating system.'}
+{$IFEND}
 
 {$IFDEF FPC}
   {$MODE ObjFPC}
+  {$MODESWITCH ClassicProcVars+}
   {$DEFINE FPC_DisableWarns}
   {$MACRO ON}
 {$ENDIF}
@@ -76,6 +131,7 @@ type
 
   ECNSTIndexOutOfBounds = class(ECNSTException);
   ECNTSInvalidValue     = class(ECNSTException);
+  ECNTSTaskRunning      = class(ECNSTException);
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -85,7 +141,7 @@ type
 type
   TCNTSTaskID = Integer;
 
-  // messaging
+  // messaging types
   TCNTSMessageParam  = TMsgrParam;
   TCNTSMessageResult = TMsgrParam;
 
@@ -229,18 +285,18 @@ type
     procedure DoTaskRemoving(TaskIndex: Integer); virtual;
     procedure DoMessage(TaskIndex: Integer; var Msg: TCNTSMessage); virtual;
     procedure DoChange; virtual;
-    // management methods
+    // internal processing methods
+    Function FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean; virtual;
     procedure MessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags); virtual;
     procedure ManageRunningTasks(IgnoredTask: Integer = -1); virtual;
     procedure TerminateTask(TaskIndex: Integer); virtual;
     procedure WaitAndFreeTask(TaskIndex: Integer); virtual;
     procedure ManagedStartTask(TaskIndex: Integer); virtual;
     procedure ManagedStopTask(TaskIndex: Integer); virtual;
+    Function InternalExtractTask(TaskIndex: Integer): TCNTSTask; virtual;
     // init, final
     procedure Initialize(OwnsTaskObjects: Boolean); virtual;
     procedure Finalize; virtual;
-    // internal processing
-    Function FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean; virtual;
   public
     class Function ProcessorCount: Integer; virtual;
     constructor Create(OwnsTaskObjects: Boolean = True);
@@ -256,14 +312,12 @@ type
     Function FindTask(TaskObject: TCNTSTask; out TaskIndex: Integer): Boolean; overload; virtual;
     Function AddTask(TaskID: TCNTSTaskID; TaskObject: TCNTSTask; Active: Boolean = True): Integer; overload; virtual;
     Function AddTask(TaskObject: TCNTSTask; Active: Boolean = True): Integer; overload; virtual;
-  (*
-    procedure Insert(Index: Integer; TaskObject: TCNTSTask); virtual;
-    procedure Move(CurIdx, NewIdx: Integer); virtual;
-    procedure Exchange(Index1, Index2: Integer); virtual;
-    Function ExtractTask(TaskObject: TCNTSTask): TCNTSTask; virtual;
-
-    AdjustTaskThreadPriority(TaskIndex: Integer; ...)?
-  *)
+    procedure InsertTask(Index: Integer; TaskID: TCNTSTaskID; TaskObject: TCNTSTask; Active: Boolean = True); overload; virtual;
+    procedure InsertTask(Index: Integer; TaskObject: TCNTSTask; Active: Boolean = True); overload; virtual;
+    procedure MoveTask(SrcIdx,DstIdx: Integer); virtual;
+    procedure ExchangeTask(Index1,Index2: Integer); virtual;
+    Function ExtractTask(TaskID: TCNTSTaskID): TCNTSTask; overload; virtual;
+    Function ExtractTask(TaskObject: TCNTSTask): TCNTSTask; overload; virtual;  
     Function RemoveTask(TaskID: TCNTSTaskID): Integer; overload; virtual;
     Function RemoveTask(TaskObject: TCNTSTask): Integer; overload; virtual;
     procedure DeleteTask(TaskIndex: Integer); virtual;
@@ -274,6 +328,10 @@ type
     procedure PauseTask(TaskIndex: Integer); virtual;
     procedure ResumeTask(TaskIndex: Integer); virtual;
     procedure StopTask(TaskIndex: Integer); virtual;
+    // task properties
+  (*
+    AdjustTaskThreadPriority(TaskIndex: Integer; ...)?
+  *)    
     // other task methods
     Function RunningTasksCount: Integer; virtual;
     procedure RunningTasksWaitFor; virtual;
@@ -314,7 +372,7 @@ type
 implementation
 
 uses
-  //Windows,
+  {$IFDEF Windows}Windows,{$ENDIF}
   InterlockedOps;
 
 {$IFDEF FPC_DisableWarns}
@@ -326,8 +384,11 @@ uses
 {===============================================================================
     External functions
 ===============================================================================}
+{$IFDEF Windows}
 
-//procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+
+{$ENDIF}
 
 {===============================================================================
 --------------------------------------------------------------------------------
@@ -367,6 +428,7 @@ end;
 
 //------------------------------------------------------------------------------
 
+{$IFDEF FPCDWM}{$PUSH}W4055 W5024{$ENDIF}
 procedure TCNTSTask.InternalMessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags);
 var
   TempMessage:  TCNTSMessage;
@@ -385,6 +447,7 @@ case Msg.Parameter1 of
     Terminate;
 end;
 end;
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -437,8 +500,10 @@ end;
 
 Function TCNTSTask.SendMessage(Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 If not fCommEndpoint.SendMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result))) then
  Result := 0;
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 end;
 
 //------------------------------------------------------------------------------
@@ -449,7 +514,9 @@ var
   ValueHi:  TCNTSMessageParam;
 begin
 ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 ValueHi := TCNTSMessageParam(PUInt32(PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_STAGEPROGRESS,ValueLo,ValueHi,TCNTSMessageParam(Stage));
 end;
 
@@ -461,7 +528,9 @@ var
   ValueHi:  TCNTSMessageParam;
 begin
 ValueLo := TCNTSMessageParam(UInt32(Addr(Progress)^));
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
 ValueHi := TCNTSMessageParam(PUInt32(PtrUInt(Addr(Progress)) + SizeOf(UInt32))^);
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 fCommEndpoint.PostMessage(CNTS_MSGR_ENDPOINT_MANAGER,CNTS_MSG_PROGRESS,ValueLo,ValueHi,0);
 end;
 
@@ -559,10 +628,12 @@ end;
 
 //------------------------------------------------------------------------------
 
+{$IFDEF FPCDWM}{$PUSH}W5024{$ENDIF}
 procedure TCNTSManager.SetCount(Value: Integer);
 begin
 // do nothing
 end;
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -636,6 +707,25 @@ end;
 
 //------------------------------------------------------------------------------
 
+Function TCNTSManager.FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean;
+var
+  i:  Integer;
+begin
+Result := False;
+TaskIndex := -1;
+For i := LowIndex to HighIndex do
+  If Assigned(fTasks[i].CommEndpoint) then
+    If fTasks[i].CommEndpoint.EndpointID = CommIndpointID then
+      begin
+        TaskIndex := i;
+        Result := True;
+        Break{For i};
+      end;
+end;
+
+//------------------------------------------------------------------------------
+
+{$IFDEF FPCDWM}{$PUSH}W4055 W5024{$ENDIF}
 procedure TCNTSManager.MessageHandler(Sender: TObject; Msg: TMsgrMessageIn; var Flags: TMsgrDispatchFlags);
 var
   TempMessage:  TCNTSMessage;
@@ -688,6 +778,7 @@ case Msg.Parameter1 of
     end;
 end;
 end;
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -802,6 +893,31 @@ end;
 
 //------------------------------------------------------------------------------
 
+Function TCNTSManager.InternalExtractTask(TaskIndex: Integer): TCNTSTask;
+var
+  i:  Integer;
+begin
+If fTasks[TaskIndex].PublicPart.TaskState in [tsReady,tsInactive,tsCompleted,tsAborted] then
+  begin
+    If Assigned(fTasks[TaskIndex].AssignedThread) then
+      begin
+        fTasks[TaskIndex].AssignedThread.WaitFor;
+        fTasks[TaskIndex].AssignedThread.Free;
+      end;
+    fTasks[TaskIndex].CommEndpoint.Free;
+    fTasks[TaskIndex].PauseEvent.Free;
+    Result := fTasks[TaskIndex].PublicPart.TaskObject;
+    For i := TaskIndex to Pred(HighIndex) do
+      fTasks[i] := fTasks[i + 1];
+    Dec(fTaskCount);
+    Shrink;
+    DoChange;  
+  end
+else raise ECNTSTaskRunning.CreateFmt('TCNTSManager.InternalExtractTask: Cannot extract running task (#%d).',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
 procedure TCNTSManager.Initialize(OwnsTaskObjects: Boolean);
 begin
 SetLength(fTasks,0);
@@ -851,32 +967,26 @@ fCommEndpoint.Free;
 fMessanger.Free;
 end;
 
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.FindCommEndpoint(CommIndpointID: TMsgrEndpointID; out TaskIndex: Integer): Boolean;
-var
-  i:  Integer;
-begin
-Result := False;
-TaskIndex := -1;
-For i := LowIndex to HighIndex do
-  If Assigned(fTasks[i].CommEndpoint) then
-    If fTasks[i].CommEndpoint.EndpointID = CommIndpointID then
-      begin
-        TaskIndex := i;
-        Result := True;
-        Break{For i};
-      end;
-end;
-
 {-------------------------------------------------------------------------------
     TCNTSManager - public methods
 -------------------------------------------------------------------------------}
 
 class Function TCNTSManager.ProcessorCount: Integer;
+{$IFDEF Windows}
+var
+  SysInfo:  TSystemInfo;
+begin
+GetNativeSystemInfo(@SysInfo);
+Result := Integer(SysInfo.dwNumberOfProcessors);
+If Result < 1 then
+  Result := 1;
+end;
+{$ELSE}
 begin
 Result := 1;
+{$message 'How to get number of logical processors on the system in linux? sysconf(_SC_NPROCESSORS_*) returns # of physical cpus.'}
 end;
+{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -1005,6 +1115,116 @@ end;
 
 //------------------------------------------------------------------------------
 
+procedure TCNTSManager.InsertTask(Index: Integer; TaskID: TCNTSTaskID; TaskObject: TCNTSTask; Active: Boolean = True);
+var
+  NewTaskItem:  TCNTSTaskItemFull;
+  i:            Integer;
+begin
+If CheckIndex(Index) then
+  begin
+    NewTaskItem.PublicPart.TaskID := TaskID;
+    NewTaskItem.PublicPart.TaskObject := TaskObject;
+    If Active then
+      NewTaskItem.PublicPart.TaskState := tsReady
+    else
+      NewTaskItem.PublicPart.TaskState := tsInactive;
+    NewTaskItem.PublicPart.TaskStage := 0;
+    NewTaskItem.PublicPart.TaskProgress := 0.0;
+    NewTaskItem.CommEndpoint := fMessanger.CreateEndpoint;
+    NewTaskItem.CommEndpointID := NewTaskItem.CommEndpoint.EndpointID;
+    NewTaskItem.PauseEvent := TEvent.Create(True,True);
+    NewTaskItem.AssignedThread := nil;
+    Grow;
+    For i := HighIndex downto Succ(Index) do
+      fTasks[i] := fTasks[i - 1];
+    fTasks[Index] := NewTaskItem;
+    DoChange;
+    DoTaskState(Index);
+    ManageRunningTasks;
+  end
+else If Index = TaskCount then
+  AddTask(TaskID,TaskObject,Active)
+else
+  raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.InsertTask: Index (%d) out of bounds.',[Index]);
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+procedure TCNTSManager.InsertTask(Index: Integer; TaskObject: TCNTSTask; Active: Boolean = True);
+begin
+InsertTask(Index,0,TaskObject,Active);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.MoveTask(SrcIdx,DstIdx: Integer);
+var
+  TempItem: TCNTSTaskItemFull;
+  i:        Integer;
+begin
+If SrcIdx <> DstIdx then
+  begin
+    If not CheckIndex(SrcIdx) then
+      raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.MoveTask: Source index (%d) out of bounds.',[SrcIdx]);
+    If not CheckIndex(DstIdx) then
+      raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.MoveTask: Destination index (%d) out of bounds.',[DstIdx]);
+    TempItem := fTasks[SrcIdx];
+    If DstIdx > SrcIdx then
+      For i := SrcIdx to Pred(DstIdx) do
+        fTasks[i] := fTasks[i + 1]
+    else
+      For i := SrcIdx downto Succ(DstIdx) do
+        fTasks[i] := fTasks[i - 1];
+    fTasks[DstIdx] := TempItem;
+    DoChange;
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure TCNTSManager.ExchangeTask(Index1,Index2: Integer);
+var
+  TempItem: TCNTSTaskItemFull;
+begin
+If Index1 <> Index2 then
+  begin
+    If not CheckIndex(Index1) then
+      raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.MoveTask: First index (%d) out of bounds.',[Index1]);
+    If not CheckIndex(Index2) then
+      raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.MoveTask: Second index (%d) out of bounds.',[Index2]);
+    TempItem := fTasks[Index1];
+    fTasks[Index1] := fTasks[Index2];
+    fTasks[Index2] := TempItem;
+    DoChange;
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.ExtractTask(TaskID: TCNTSTaskID): TCNTSTask;
+var
+  Index:  Integer;
+begin
+If FindTask(TaskID,Index) then
+  Result := InternalExtractTask(Index)
+else
+  Result := nil;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function TCNTSManager.ExtractTask(TaskObject: TCNTSTask): TCNTSTask;
+var
+  Index:  Integer;
+begin
+If FindTask(TaskObject,Index) then
+  Result := InternalExtractTask(Index)
+else
+  Result := nil;
+end;
+
+//------------------------------------------------------------------------------
+
 Function TCNTSManager.RemoveTask(TaskID: TCNTSTaskID): Integer;
 begin
 If FindTask(TaskID,Result) then
@@ -1081,7 +1301,7 @@ procedure TCNTSManager.StartTask(TaskIndex: Integer);
 begin
 If CheckIndex(TaskIndex) then
   begin
-    If fTasks[TaskIndex].PublicPart.TaskState = tsReady then
+    If fTasks[TaskIndex].PublicPart.TaskState in [tsReady,tsInactive] then
       begin
         fTasks[TaskIndex].PublicPart.TaskObject.InternalSetup(
           fTasks[TaskIndex].PublicPart.TaskID,
@@ -1133,6 +1353,7 @@ If CheckIndex(TaskIndex) then
       begin
         fTasks[TaskIndex].PublicPart.TaskState := tsReady;
         DoTaskState(TaskIndex);
+        ManageRunningTasks;
       end;
     tsPaused,
     tsQueued:
@@ -1165,7 +1386,6 @@ If CheckIndex(TaskIndex) then
         fTasks[TaskIndex].PublicPart.TaskState := tsStopping;
         fTasks[TaskIndex].PauseEvent.Unlock;
         DoTaskState(TaskIndex);
-        ManageRunningTasks(TaskIndex);
       end;
   end
 else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.StopTask: Index (%d) out of bounds.',[TaskIndex]);
@@ -1225,7 +1445,9 @@ end;
 Function TCNTSManager.SendMessage(TaskIndex: Integer; Param1,Param2: TCNTSMessageParam): TCNTSMessageResult;
 begin
 If CheckIndex(TaskIndex) then
+{$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
   fCommEndpoint.SendMessage(fTasks[TaskIndex].CommEndpointID,CNTS_MSG_USER,Param1,Param2,TMsgrParam(Addr(Result)))
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
 else
   raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.SendMessage: Index (%d) out of bounds.',[TaskIndex]);
 end;
@@ -1237,137 +1459,5 @@ begin
 fCommEndpoint.Cycle(Timeout);
 end;
 
-
-
-(*
-
-
-{-------------------------------------------------------------------------------
-    TCNTSManager - public methods
--------------------------------------------------------------------------------}
-
-class Function TCNTSManager.GetProcessorCount: Integer;
-var
-  SysInfo:  TSystemInfo;
-begin
-GetNativeSystemInfo(@SysInfo);
-Result := Integer(SysInfo.dwNumberOfProcessors);
-If Result < 1 then
-  Result := 1;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.Insert(Index: Integer; TaskObject: TCNTSTask);
-var
-  NewTaskItem:  TCNTSTaskItemFull;
-  i:            Integer;
-begin
-If (Index >= Low(fTasks)) and (Index <= High(fTasks)) then
-  begin
-    NewTaskItem.PublicPart.State := tsReady;
-    NewTaskItem.PublicPart.TaskObject := TaskObject;
-    NewTaskItem.PublicPart.Progress := 0.0;
-    NewTaskItem.CommEndpoint := fMessanger.CreateEndpoint;
-    NewTaskItem.PauseObject := TEvent.Create(nil,True,True,'');
-    NewTaskItem.AssignedThread := nil;
-    SetLength(fTasks,Length(fTasks) + 1);
-    For i := High(fTasks) downto Succ(Index) do
-      fTasks[i] := fTasks[i - 1];
-    fTasks[Index] := NewTaskItem;
-    If Assigned(fOnChange) then
-      fOnChange(Self);
-    If Assigned(fOnTaskState) then
-      fOnTaskState(Self,Index);
-    ManageRunningTasks;
-  end
-else If Index = Length(fTasks) then
-  AddTask(TaskObject)
-else
-  raise Exception.CreateFmt('TCNTSManager.Insert: Index (%d) out of bounds.',[Index]);
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.Move(CurIdx, NewIdx: Integer);
-var
-  TempItem: TCNTSTaskItemFull;
-  i:        Integer;
-begin
-If CurIdx <> NewIdx then
-  begin
-    If (CurIdx < Low(fTasks)) or (CurIdx > High(fTasks)) then
-      raise Exception.CreateFmt('TCNTSManager.Move: CurIdx (%d) out of bounds.',[CurIdx]);
-    If (NewIdx < Low(fTasks)) or (NewIdx > High(fTasks)) then
-      raise Exception.CreateFmt('TCNTSManager.Move: NewIdx (%d) out of bounds.',[NewIdx]);
-    TempItem := fTasks[CurIdx];
-    If NewIdx > CurIdx then
-      For i := CurIdx to Pred(NewIdx) do
-        fTasks[i] := fTasks[i + 1]
-    else
-      For i := CurIdx downto Succ(NewIdx) do
-        fTasks[i] := fTasks[i - 1];
-    fTasks[NewIdx] := TempItem;
-    If Assigned(fOnChange) then
-      fOnChange(Self);
-  end;
-end;
-
-//------------------------------------------------------------------------------
-
-procedure TCNTSManager.Exchange(Index1, Index2: Integer);
-var
-  TempItem: TCNTSTaskItemFull;
-begin
-If Index1 <> Index2 then
-  begin
-    If (Index1 < Low(fTasks)) or (Index1 > High(fTasks)) then
-      raise Exception.CreateFmt('TCNTSManager.Exchange: Index1 (%d) out of bounds.',[Index1]);
-    If (Index2 < Low(fTasks)) or (Index2 > High(fTasks)) then
-      raise Exception.CreateFmt('TCNTSManager.Exchange: Index2 (%d) out of bounds.',[Index2]);
-    TempItem := fTasks[Index1];
-    fTasks[Index1] := fTasks[Index2];
-    fTasks[Index2] := TempItem;
-    If Assigned(fOnChange) then
-      fOnChange(Self);
-  end;
-end;
-
-//------------------------------------------------------------------------------
-
-Function TCNTSManager.ExtractTask(TaskObject: TCNTSTask): TCNTSTask;
-var
-  Index:  Integer;
-  i:      Integer;
-begin
-Index := IndexOfTask(TaskObject);
-If Index >= 0 then
-  begin
-    If not(fTasks[Index].PublicPart.State in [tsRunning,tsPaused,tsWaiting]) then
-      begin
-        If Assigned(fTasks[Index].AssignedThread) then
-          begin
-            fTasks[Index].AssignedThread.WaitFor;
-            FreeAndNil(fTasks[Index].AssignedThread);
-          end;
-        If Assigned(fTasks[Index].CommEndpoint) then
-          begin
-            fTasks[Index].CommEndpoint.OnMessageTraversing := nil;
-            FreeAndNil(fTasks[Index].CommEndpoint);
-          end;
-        fTasks[Index].PauseObject.Free;
-        Result := fTasks[Index].PublicPart.TaskObject;
-        For i := Index to Pred(High(fTasks)) do
-          fTasks[i] := fTasks[i + 1];
-        SetLength(fTasks,Length(fTasks) - 1);
-        If Assigned(fOnChange) then
-          fOnChange(Self);
-      end
-    else raise Exception.CreateFmt('TCNTSManager.ExtractTask: Cannot extract running task (#%d).',[Index]);
-  end
-else Result := nil;
-end;
-
-*)
 
 end.
