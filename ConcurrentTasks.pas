@@ -9,8 +9,8 @@
 
   Concurrent tasks
 
-    Simple library providing means for running and controlling multiple
-    separate tasks run in threads (each task in its own thread).
+    Small library providing means for running and controlling multiple separate
+    tasks run in threads (each task in its own thread).
 
     To use this unit, create a descendant of class TCNTSTask and put the
     main processing code into method Main (override it). Then pass instance of
@@ -20,11 +20,11 @@
     available).
     You can call any public method of TCNTSTask from Main, but remember that
     the code is running in its own thread, so protect any shared data you want
-    to access, tasks don't have any mean of thread-safety and data integrity
+    to access, tasks don't have any mean of thread safety and data integrity
     protection.
 
     In Main, you should call method Cycle regularly, this ensures the task
-    responds to requests from the manager and also enables ther intergrated
+    responds to requests from the manager and also enables the intergrated
     messaging system (which is also used for progress signalling). If you want
     to react to incoming messages, override task's protected method
     ProcessMessage.
@@ -48,7 +48,7 @@
           Result := not Terminated;
         end;
 
-  Version 1.2 alfa (tested, but incomplete) (2022-09-18)
+  Version 1.2 alpha (tested, but incomplete) (2022-09-18)
 
   Last change 2022-09-18
 
@@ -329,9 +329,8 @@ type
     procedure ResumeTask(TaskIndex: Integer); virtual;
     procedure StopTask(TaskIndex: Integer); virtual;
     // task properties
-  (*
-    AdjustTaskThreadPriority(TaskIndex: Integer; ...)?
-  *)    
+    Function GetTaskThreadPriority(TaskIndex: Integer): TThreadPriority; virtual;
+    Function SetTaskThreadPriority(TaskIndex: Integer; NewPriority: TThreadPriority): TThreadPriority; virtual;
     // other task methods
     Function RunningTasksCount: Integer; virtual;
     procedure RunningTasksWaitFor; virtual;
@@ -1389,6 +1388,36 @@ If CheckIndex(TaskIndex) then
       end;
   end
 else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.StopTask: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.GetTaskThreadPriority(TaskIndex: Integer): TThreadPriority;
+begin
+If CheckIndex(TaskIndex) then
+  begin
+    If Assigned(fTasks[TaskIndex].AssignedThread) then
+      Result := fTasks[TaskIndex].AssignedThread.Priority
+    else
+      Result := tpLower;  // this is the default with which the assigned threads are created
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.GetTaskThreadPriority: Index (%d) out of bounds.',[TaskIndex]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function TCNTSManager.SetTaskThreadPriority(TaskIndex: Integer; NewPriority: TThreadPriority): TThreadPriority;
+begin
+If CheckIndex(TaskIndex) then
+  begin
+    If Assigned(fTasks[TaskIndex].AssignedThread) then
+      begin
+        Result := fTasks[TaskIndex].AssignedThread.Priority;
+        fTasks[TaskIndex].AssignedThread.Priority := NewPriority;
+      end
+    else Result := tpLower;
+  end
+else raise ECNSTIndexOutOfBounds.CreateFmt('TCNTSManager.SetTaskThreadPriority: Index (%d) out of bounds.',[TaskIndex]);
 end;
 
 //------------------------------------------------------------------------------
