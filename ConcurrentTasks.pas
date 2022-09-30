@@ -48,9 +48,9 @@
           Result := not Terminated;
         end;
 
-  Version 1.2 alpha (tested, but incomplete) (2022-09-18)
+  Version 1.2 (2022-09-30)
 
-  Last change 2022-09-18
+  Last change 2022-09-30
 
   ©2017-2022 František Milt
 
@@ -371,7 +371,7 @@ type
 implementation
 
 uses
-  {$IFDEF Windows}Windows,{$ENDIF}
+  {$IFDEF Windows}Windows,{$ELSE}BaseUnix,{$ENDIF}
   InterlockedOps;
 
 {$IFDEF FPC_DisableWarns}
@@ -386,6 +386,14 @@ uses
 {$IFDEF Windows}
 
 procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+
+{$ELSE}
+
+const
+//_SC_NPROCESSORS_CONF = 83;  // not used anywhere
+  _SC_NPROCESSORS_ONLN = 84;
+
+Function sysconf(name: cInt): cLong; cdecl; external;
 
 {$ENDIF}
 
@@ -982,8 +990,9 @@ If Result < 1 then
 end;
 {$ELSE}
 begin
-Result := 1;
-{$message 'How to get number of logical processors on the system in linux? sysconf(_SC_NPROCESSORS_*) returns # of physical cpus.'}
+Result := sysconf(_SC_NPROCESSORS_ONLN);
+If Result < 1 then
+  Result := 1;
 end;
 {$ENDIF}
 
